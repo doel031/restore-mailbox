@@ -1,0 +1,17 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup and temporary archives
+*.tgz
+*.tar.gz
+*.zip
+
+# Logs
+*.log
+/logs/
+
+# Temporary files
+*.tmp
+*.stat
+*.records
