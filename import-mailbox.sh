@@ -195,7 +195,20 @@ process_account() {
             for part in "\${parts[@]}"; do
                 current="\$current/\$part"
                 if ! echo "\$created_folders" | grep -qx "\$current"; then
-                    zmmailbox -z -m "$TARGET_ACCOUNT" createFolder "\$current" >/dev/null 2>&1
+                    cf_out=\$(zmmailbox -z -m "$TARGET_ACCOUNT" createFolder "\$current" 2>&1)
+                    cf_status=\$?
+                    ts_f=\$(date '+%H:%M:%S')
+
+                    if [ \$cf_status -eq 0 ]; then
+                        folder_id=\$(echo "\$cf_out" | tr -d ' \r\n')
+                        printf "[%s] [FOLDER] Created: %s (ID: %s)\n" "\$ts_f" "\$current" "\$folder_id"
+                    elif echo "\$cf_out" | grep -qi "already_exists"; then
+                        :
+                    else
+                        cf_err=\$(echo "\$cf_out" | head -n 1 | tr -d '\r\n')
+                        printf "[%s] [FOLDER] Failed to create: %s (Error: %s)\n" "\$ts_f" "\$current" "\$cf_err"
+                    fi
+
                     created_folders="\$created_folders
 \$current"
                 fi
