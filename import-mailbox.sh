@@ -168,6 +168,8 @@ process_account() {
         count=0
         imported=0
         duplicate=0
+        failed=0
+        quota_hit=0
         rm -f "\$TEMP_ROOT/.folder_records"
 
         # Default folders list to prevent redundant createFolder calls
@@ -205,6 +207,10 @@ process_account() {
 
                     if [ \$cf_status -eq 0 ]; then
                         printf "[%s] [FOLDER] Created: %s\n" "\$ts_f" "\$current"
+                    elif echo "\$cf_out" | grep -qiE "QUOTA_EXCEEDED|quota exceeded|mailbox is full"; then
+                        quota_hit=1
+                        printf "[%s] [QUOTA] ⚠️ Mailbox quota exceeded while creating folder: %s!\n" "\$ts_f" "\$current"
+                        return 1
                     elif echo "\$cf_out" | grep -qi "already_exists"; then
                         if [ "$MAIL_PLATFORM" = "Carbonio" ]; then
                             # If folder already exists in Carbonio, ensure its view is set to message (in case it was created as unknown)
@@ -334,10 +340,15 @@ process_account() {
             folder_display="\${target_folder#/}"
             f_new=0
             f_dup=0
+            f_fail=0
+            f_recorded=0
 
             echo "[\$(date '+%H:%M:%S')] -> Processing folder: \$target_folder"
             echo "\$count/\$total_msgs Import \$folder_display" > "$PROGRESS_DIR/$TARGET_ACCOUNT"
             ensure_folder "\$target_folder"
+            if [ "\$quota_hit" -eq 1 ]; then
+                break
+            fi
 
             for f in "\$dir"/*; do
                 if [ ! -f "\$f" ] || [[ "\$f" == *.meta ]]; then
@@ -382,21 +393,42 @@ process_account() {
                 else
                     err_msg=\$(echo "\$add_res" | grep -v 'INFO' | grep -v 'DEBUG' | head -n 1 | tr -d '\r\n')
                     [ -z "\$err_msg" ] && err_msg=\$(echo "\$add_res" | head -n 1 | tr -d '\r\n')
-                    printf "[%s] [FAIL] %s/%s - \"%s\" (Error: %s)\n" "\$ts" "\$folder_display" "\$fname" "\$subject" "\$err_msg"
+                    failed=\$((failed + 1))
+                    f_fail=\$((f_fail + 1))
+
+                    if echo "\$add_res" | grep -qiE "QUOTA_EXCEEDED|quota exceeded|mailbox is full"; then
+                        quota_hit=1
+                        printf "[%s] [FAIL] %s/%s - \"%s\" (Error: %s)\n" "\$ts" "\$folder_display" "\$fname" "\$subject" "\$err_msg"
+                        printf "[%s] [QUOTA] ⚠️ Mailbox quota exceeded for %s! Halting import for this account.\n" "\$ts" "$TARGET_ACCOUNT"
+                        count=\$((count + 1))
+                        f_recorded=1
+                        echo "\$folder_display|\$f_new|\$f_dup|\$f_fail" >> "\$TEMP_ROOT/.folder_records"
+                        break 2
+                    else
+                        printf "[%s] [FAIL] %s/%s - \"%s\" (Error: %s)\n" "\$ts" "\$folder_display" "\$fname" "\$subject" "\$err_msg"
+                    fi
                 fi
 
                 count=\$((count + 1))
                 echo "\$count/\$total_msgs Import \$folder_display" > "$PROGRESS_DIR/$TARGET_ACCOUNT"
             done
-            echo "\$folder_display|\$f_new|\$f_dup" >> "\$TEMP_ROOT/.folder_records"
+            if [ "\$f_recorded" -ne 1 ]; then
+                echo "\$folder_display|\$f_new|\$f_dup|\$f_fail" >> "\$TEMP_ROOT/.folder_records"
+            fi
         done < "\$TEMP_ROOT/.dirlist"
-        echo "\$count/\$total_msgs Completed" > "$PROGRESS_DIR/$TARGET_ACCOUNT"
-        echo "\$total_msgs:\$imported:\$duplicate" > "\$TEMP_ROOT/.stat"
+        if [ "\$quota_hit" -eq 1 ]; then
+            failed=\$((total_msgs - imported - duplicate))
+            [ "\$failed" -lt 0 ] && failed=0
+            echo "\$count/\$total_msgs Stopped (Quota Exceeded)" > "$PROGRESS_DIR/$TARGET_ACCOUNT"
+        else
+            echo "\$count/\$total_msgs Completed" > "$PROGRESS_DIR/$TARGET_ACCOUNT"
+        fi
+        echo "\$total_msgs:\$imported:\$duplicate:\$failed:\$quota_hit" > "\$TEMP_ROOT/.stat"
 EOF
 
-        local total="$total_msgs" imported=0 duplicate=0
+        local total="$total_msgs" imported=0 duplicate=0 failed=0 quota_hit=0
         if [ -f "$TEMP_EXTRACT_DIR/.stat" ]; then
-            IFS=':' read -r total imported duplicate < "$TEMP_EXTRACT_DIR/.stat"
+            IFS=':' read -r total imported duplicate failed quota_hit < "$TEMP_EXTRACT_DIR/.stat"
         fi
 
         rm -f "$PROGRESS_DIR/$TARGET_ACCOUNT"
@@ -413,8 +445,16 @@ EOF
             duration_str="${dur_sec}s"
         fi
 
-        echo "[$end_time_str] Completed for account: $TARGET_ACCOUNT"
-        echo "✅ SUCCESS: $TARGET_ACCOUNT (Total: $total, Imported: $imported, Duplicate: $duplicate)" >> "$SUMMARY_LOG"
+        if [ "$quota_hit" -eq 1 ]; then
+            echo "[$end_time_str] Stopped for account: $TARGET_ACCOUNT (QUOTA EXCEEDED)"
+            echo "⚠️ QUOTA EXCEEDED: $TARGET_ACCOUNT (Total: $total, Imported: $imported, Duplicate: $duplicate, Failed/Unimported: $failed - Mailbox Full)" >> "$SUMMARY_LOG"
+        elif [ "$failed" -gt 0 ]; then
+            echo "[$end_time_str] Completed for account: $TARGET_ACCOUNT (WITH ERRORS)"
+            echo "⚠️ WITH ERRORS: $TARGET_ACCOUNT (Total: $total, Imported: $imported, Duplicate: $duplicate, Failed: $failed)" >> "$SUMMARY_LOG"
+        else
+            echo "[$end_time_str] Completed for account: $TARGET_ACCOUNT"
+            echo "✅ SUCCESS: $TARGET_ACCOUNT (Total: $total, Imported: $imported, Duplicate: $duplicate)" >> "$SUMMARY_LOG"
+        fi
         echo ""
 
         local record_file="$TEMP_EXTRACT_DIR/.folder_records"
@@ -429,7 +469,9 @@ EOF
             -v acc="$TARGET_ACCOUNT" \
             -v tot="$total" \
             -v imp="$imported" \
-            -v dup="$duplicate" '
+            -v dup="$duplicate" \
+            -v fail="$failed" \
+            -v quota="$quota_hit" '
         BEGIN {
             order["Inbox"] = 1; names[1] = "Inbox"
             order["Sent"] = 2; names[2] = "Sent"
@@ -440,6 +482,7 @@ EOF
             f = $1
             f_new[f] += $2
             f_dup[f] += $3
+            f_fail[f] += $4
             if (!(f in order)) {
                 order[f] = ++count
                 names[count] = f
@@ -448,6 +491,15 @@ EOF
         END {
             imp_pct = (tot > 0) ? sprintf("(%.1f%%)", (imp * 100.0) / tot) : "(0.0%)"
             dup_pct = (tot > 0) ? sprintf("(%.1f%%)", (dup * 100.0) / tot) : "(0.0%)"
+            fail_pct = (tot > 0) ? sprintf("(%.1f%%)", (fail * 100.0) / tot) : "(0.0%)"
+
+            if (quota == 1) {
+                status_str = "⚠️ QUOTA EXCEEDED (Mailbox Full)"
+            } else if (fail > 0) {
+                status_str = "⚠️ COMPLETED WITH ERRORS"
+            } else {
+                status_str = "✅ COMPLETED"
+            }
 
             printf "===============================================================================\n"
             title = "MAILBOX RESTORE REPORT: " acc
@@ -455,13 +507,20 @@ EOF
             if (pad < 0) pad = 0
             printf "%*s%s\n", pad, "", title
             printf "===============================================================================\n"
-            printf " Start Time    : %-22s  Status       : ✅ COMPLETED\n", start
+            printf " Start Time    : %-22s  Status       : %s\n", start, status_str
             printf " End Time      : %-22s  Duration     : %s\n", end, dur
             printf "-------------------------------------------------------------------------------\n"
             printf " SUMMARY:\n"
             printf "   • Total Messages : %d messages\n", tot
             printf "   • New Messages   : %d messages %s\n", imp, imp_pct
             printf "   • Duplicates     : %d messages %s\n", dup, dup_pct
+            if (fail > 0) {
+                if (quota == 1) {
+                    printf "   • Failed (Quota) : %d messages %s (Mailbox Full)\n", fail, fail_pct
+                } else {
+                    printf "   • Failed         : %d messages %s\n", fail, fail_pct
+                }
+            }
             printf "-------------------------------------------------------------------------------\n"
             printf " FOLDER BREAKDOWN:\n"
             printf "┌────────────────────────────────┬──────────┬────────────────┬────────────────┐\n"
