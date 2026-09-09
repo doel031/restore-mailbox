@@ -142,6 +142,33 @@ process_account() {
             return
         fi
 
+        # Pre-check: Verify target account existence on mail server before extracting archive
+        echo "Checking account on $MAIL_PLATFORM..." > "$PROGRESS_DIR/$TARGET_ACCOUNT"
+        chmod 666 "$PROGRESS_DIR/$TARGET_ACCOUNT" 2>/dev/null
+
+        local acc_check
+        if [ "$MAIL_USER" = "zextras" ]; then
+            acc_check=$(su - "$MAIL_USER" -c "export PATH=/opt/zextras/bin:\$PATH; zmprov ga '$TARGET_ACCOUNT' zimbraAccountStatus" 2>&1)
+        else
+            acc_check=$(su - "$MAIL_USER" -c "export PATH=/opt/zimbra/bin:\$PATH; zmprov ga '$TARGET_ACCOUNT' zimbraAccountStatus" 2>&1)
+        fi
+        local acc_check_status=$?
+
+        if [ $acc_check_status -ne 0 ] || echo "$acc_check" | grep -qiE "no_such_account|no such account"; then
+            echo "[$start_time_str] [SKIP] ⚠️ Account '$TARGET_ACCOUNT' does not exist on $MAIL_PLATFORM! Skipping restore."
+            echo "⏭️ SKIPPED: $TARGET_ACCOUNT (Account does not exist on mail server)" >> "$SUMMARY_LOG"
+            rm -f "$PROGRESS_DIR/$TARGET_ACCOUNT"
+            return
+        fi
+
+        local acc_status=$(echo "$acc_check" | awk '/^zimbraAccountStatus:/ {print $2}')
+        if [ "$acc_status" = "closed" ]; then
+            echo "[$start_time_str] [SKIP] ⚠️ Account '$TARGET_ACCOUNT' status is CLOSED! Skipping restore."
+            echo "⏭️ SKIPPED: $TARGET_ACCOUNT (Account status is CLOSED)" >> "$SUMMARY_LOG"
+            rm -f "$PROGRESS_DIR/$TARGET_ACCOUNT"
+            return
+        fi
+
         echo "Extracting backup archive..." > "$PROGRESS_DIR/$TARGET_ACCOUNT"
         chmod 666 "$PROGRESS_DIR/$TARGET_ACCOUNT"
 
@@ -491,6 +518,10 @@ process_account() {
                         f_recorded=1
                         echo "\$folder_display|\$f_new|\$f_dup|\$f_fail" >> "\$TEMP_ROOT/.folder_records"
                         break 2
+                    elif echo "\$add_res" | grep -qiE "no_such_account|no such account"; then
+                        printf "[%s] [FAIL] %s/%s - \"%s\" (Error: %s)\n" "\$ts" "\$folder_display" "\$fname" "\$subject" "\$err_msg"
+                        printf "[%s] [SKIP] ⚠️ Account %s does not exist on mail server! Halting import.\n" "\$ts" "$TARGET_ACCOUNT"
+                        break 2
                     else
                         printf "[%s] [FAIL] %s/%s - \"%s\" (Error: %s)\n" "\$ts" "\$folder_display" "\$fname" "\$subject" "\$err_msg"
                     fi
@@ -736,8 +767,9 @@ if [ -f "$SUMMARY_LOG" ]; then
     success_count=$(grep "✅ SUCCESS" "$SUMMARY_LOG" 2>/dev/null | wc -l | tr -d ' ')
     quota_count=$(grep "⚠️ QUOTA EXCEEDED" "$SUMMARY_LOG" 2>/dev/null | wc -l | tr -d ' ')
     error_count=$(grep "⚠️ WITH ERRORS" "$SUMMARY_LOG" 2>/dev/null | wc -l | tr -d ' ')
+    skipped_count=$(grep "⏭️ SKIPPED" "$SUMMARY_LOG" 2>/dev/null | wc -l | tr -d ' ')
     fail_count=$(grep "❌ FAILED" "$SUMMARY_LOG" 2>/dev/null | wc -l | tr -d ' ')
-    total_accounts=$((success_count + quota_count + error_count + fail_count))
+    total_accounts=$((success_count + quota_count + error_count + skipped_count + fail_count))
 
     tot_msgs=$(awk -F'Total: ' '{print $2}' "$SUMMARY_LOG" | awk -F'[,)]' '{sum += $1} END {print sum+0}')
     tot_imported=$(awk -F'Imported: ' '{print $2}' "$SUMMARY_LOG" | awk -F'[,)]' '{sum += $1} END {print sum+0}')
@@ -746,7 +778,7 @@ if [ -f "$SUMMARY_LOG" ]; then
 
     echo "--------------------------------------------------"
     echo "Mail Server Platform : $MAIL_PLATFORM (User: $MAIL_USER)"
-    echo "Total Accounts       : $total_accounts (Success: $success_count, Quota Exceeded: $quota_count, Errors: $error_count, Failed: $fail_count)"
+    echo "Total Accounts       : $total_accounts (Success: $success_count, Quota Exceeded: $quota_count, Errors: $error_count, Skipped: $skipped_count, Failed: $fail_count)"
     echo "Total Messages       : $tot_msgs"
     echo "Total Imported       : $tot_imported"
     echo "Total Duplicates     : $tot_duplicate"
