@@ -200,9 +200,7 @@ process_account() {
                     ts_f=\$(date '+%H:%M:%S')
 
                     if [ \$cf_status -eq 0 ]; then
-                        folder_id=\$(echo "\$cf_out" | grep -v 'INFO' | grep -v 'DEBUG' | grep -Eo '^[0-9]+' | head -n 1)
-                        [ -z "\$folder_id" ] && folder_id="OK"
-                        printf "[%s] [FOLDER] Created: %s (ID: %s)\n" "\$ts_f" "\$current" "\$folder_id"
+                        printf "[%s] [FOLDER] Created: %s\n" "\$ts_f" "\$current"
                     elif echo "\$cf_out" | grep -qi "already_exists"; then
                         # If folder already exists, ensure its view is set to message (in case it was created as unknown)
                         gf_res=\$(zmmailbox -z -m "$TARGET_ACCOUNT" getFolder "\$current" 2>/dev/null)
@@ -211,7 +209,7 @@ process_account() {
                             gf_id=\$(echo "\$gf_res" | grep -m 1 '"id"' | sed -E 's/.*"id":[[:space:]]*"([^"]+)".*/\1/')
                             if [ -n "\$gf_id" ]; then
                                 zmsoap -z -m "$TARGET_ACCOUNT" FolderActionRequest/action @id="\$gf_id" @op="update" @view="message" >/dev/null 2>&1
-                                printf "[%s] [FOLDER] Repaired view to 'message': %s (ID: %s)\n" "\$ts_f" "\$current" "\$gf_id"
+                                printf "[%s] [FOLDER] Repaired view: %s\n" "\$ts_f" "\$current"
                             fi
                         fi
                     else
@@ -236,7 +234,7 @@ process_account() {
         }' | while IFS=$'\t' read -r fid fpath; do
             if [ -n "\$fid" ] && [ -n "\$fpath" ]; then
                 zmsoap -z -m "$TARGET_ACCOUNT" FolderActionRequest/action @id="\$fid" @op="update" @view="message" >/dev/null 2>&1
-                printf "[%s] [FOLDER] Repaired view to 'message': %s (ID: %s)\n" "\$(date '+%H:%M:%S')" "\$fpath" "\$fid"
+                printf "[%s] [FOLDER] Repaired view: %s\n" "\$(date '+%H:%M:%S')" "\$fpath"
             fi
         done
 
@@ -314,9 +312,7 @@ process_account() {
                 add_status=\$?
 
                 if [ \$add_status -eq 0 ]; then
-                    item_id=\$(echo "\$add_res" | grep -v 'INFO' | grep -v 'DEBUG' | grep -Eo '^[0-9]+' | head -n 1)
-                    [ -z "\$item_id" ] && item_id=\$(echo "\$add_res" | tr -d ' \r\n')
-                    printf "[%s] [OK]   %s/%s - \"%s\" (ID: %s)\n" "\$ts" "\$folder_display" "\$fname" "\$subject" "\$item_id"
+                    printf "[%s] [OK]   %s/%s - \"%s\"\n" "\$ts" "\$folder_display" "\$fname" "\$subject"
                     imported=\$((imported + 1))
                     f_new=\$((f_new + 1))
                 else
