@@ -181,7 +181,7 @@ process_account() {
         local total_msgs=$(find "$TEMP_EXTRACT_DIR" -type f -not -name "*.meta" 2>/dev/null | wc -l | tr -d ' ')
         local backup_kb=$(du -sk "$TEMP_EXTRACT_DIR" 2>/dev/null | awk '{print $1}')
         local backup_bytes=$((backup_kb * 1024))
-        find "$TEMP_EXTRACT_DIR" -mindepth 1 -type d | sort > "$TEMP_EXTRACT_DIR/.dirlist"
+        find "$TEMP_EXTRACT_DIR" -type d | sort > "$TEMP_EXTRACT_DIR/.dirlist"
         chmod 666 "$TEMP_EXTRACT_DIR/.dirlist"
         echo "0/$total_msgs Starting..." > "$PROGRESS_DIR/$TARGET_ACCOUNT"
 
@@ -301,12 +301,11 @@ process_account() {
             local target="\$1"
             local clean="\${target#/}"
             local current=""
-            local old_ifs="\$IFS"
-            IFS="/"
-            local -a parts=(\$clean)
-            IFS="\$old_ifs"
+            local -a parts
+            IFS="/" read -r -a parts <<< "\$clean"
 
             for part in "\${parts[@]}"; do
+                [ -z "\$part" ] && continue
                 current="\$current/\$part"
                 if ! echo "\$created_folders" | grep -qx "\$current"; then
                     if [ "$MAIL_PLATFORM" = "Carbonio" ]; then
@@ -355,10 +354,15 @@ process_account() {
         # Pre-scan and move any existing custom root-level folders to /Archive so they are visible in Webmail
         gaf_out=\$(zmmailbox -z -m "$TARGET_ACCOUNT" gaf 2>/dev/null)
         echo "\$gaf_out" | awk '\$1 ~ /^[0-9]+\$/ {
-            id = \$1;
-            path = \$5;
-            for (i = 6; i <= NF; i++) path = path " " \$i;
-            print id "\t" path;
+            id = \$1; path = "";
+            for (i = 2; i <= NF; i++) {
+                if (\$i ~ /^\//) {
+                    path = \$i;
+                    for (j = i + 1; j <= NF; j++) path = path " " \$j;
+                    break;
+                }
+            }
+            if (path != "") print id "\t" path;
         }' | while IFS=$'\t' read -r fid fpath; do
             case "\$fpath" in
                 /|/Inbox|/Inbox/*|/Sent|/Sent/*|/Drafts|/Drafts/*|/Trash|/Trash/*|/Junk|/Junk/*|/Archive|/Archive/*|/Contacts|/Contacts/*|/Calendar|/Calendar/*|/Tasks|/Tasks/*|/Briefcase|/Briefcase/*|/Chats*|/Emailed\ Contacts*)
@@ -370,10 +374,21 @@ process_account() {
                     sub_f=\$(echo "\${fpath#/}" | cut -s -d/ -f2-)
                     if [ -z "\$sub_f" ]; then
                         # Move /Cosco to /Archive/Cosco
+                        ensure_folder "/Archive/\$top_f"
                         zmmailbox -z -m "$TARGET_ACCOUNT" renameFolder "\$fpath" "/Archive/\$top_f" >/dev/null 2>&1
-                        if [ \$? -eq 0 ]; then
-                            printf "[%s] [FOLDER] Moved custom folder: %s -> /Archive/%s\n" "\$(date '+%H:%M:%S')" "\$fpath" "\$top_f"
+                        if [ \$? -ne 0 ]; then
+                            # If renameFolder failed (destination already exists), move messages in batches
+                            while true; do
+                                s_res=\$(zmmailbox -z -m "$TARGET_ACCOUNT" search -l 1000 -t message "in:\"\$fpath\"" 2>/dev/null)
+                                mids=\$(echo "\$s_res" | awk '\$1 ~ /^[0-9]+\$/ && \$2 == "mess" {print \$1}')
+                                [ -z "\$mids" ] && break
+                                for mid in \$mids; do
+                                    zmmailbox -z -m "$TARGET_ACCOUNT" moveMessage "\$mid" "/Archive/\$top_f" >/dev/null 2>&1
+                                done
+                            done
+                            zmmailbox -z -m "$TARGET_ACCOUNT" deleteFolder "\$fpath" >/dev/null 2>&1
                         fi
+                        printf "[%s] [FOLDER] Moved custom folder: %s -> /Archive/%s\n" "\$(date '+%H:%M:%S')" "\$fpath" "\$top_f"
                     fi
                     ;;
             esac
@@ -381,20 +396,27 @@ process_account() {
 
         # Pre-scan and merge any existing sharded folders (e.g. "Notifikasi BCA!2" -> "Notifikasi BCA")
         echo "\$gaf_out" | awk '\$1 ~ /^[0-9]+\$/ {
-            id = \$1;
-            path = \$5;
-            for (i = 6; i <= NF; i++) path = path " " \$i;
+            id = \$1; path = "";
+            for (i = 2; i <= NF; i++) {
+                if (\$i ~ /^\//) {
+                    path = \$i;
+                    for (j = i + 1; j <= NF; j++) path = path " " \$j;
+                    break;
+                }
+            }
             if (path ~ /![0-9]+/) print id "\t" path;
         }' | while IFS=$'\t' read -r fid fpath; do
             clean_dest=\$(echo "\$fpath" | sed -E 's/![0-9]+(\/|$)/\1/g')
             ensure_folder "\$clean_dest"
             
-            # Move all messages from sharded folder to clean folder
-            s_res=\$(zmmailbox -z -m "$TARGET_ACCOUNT" search -l 1000 -t message "in:\"\$fpath\"" 2>/dev/null)
-            echo "\$s_res" | awk '\$1 ~ /^[0-9]+\$/ && \$2 == "mess" {print \$1}' | while read -r mid; do
-                if [ -n "\$mid" ]; then
+            # Move all messages from sharded folder to clean folder in batches
+            while true; do
+                s_res=\$(zmmailbox -z -m "$TARGET_ACCOUNT" search -l 1000 -t message "in:\"\$fpath\"" 2>/dev/null)
+                mids=\$(echo "\$s_res" | awk '\$1 ~ /^[0-9]+\$/ && \$2 == "mess" {print \$1}')
+                [ -z "\$mids" ] && break
+                for mid in \$mids; do
                     zmmailbox -z -m "$TARGET_ACCOUNT" moveMessage "\$mid" "\$clean_dest" >/dev/null 2>&1
-                fi
+                done
             done
             
             # Delete the empty sharded folder
@@ -404,11 +426,19 @@ process_account() {
 
         # Pre-scan and repair any existing custom folders with 'unkn' view (Carbonio specific)
         if [ "$MAIL_PLATFORM" = "Carbonio" ]; then
-            echo "\$gaf_out" | awk '\$2 == "unkn" && \$5 != "/" && \$5 != "/Trash" && \$1 ~ /^[0-9]+\$/ {
-                id = \$1;
-                path = \$5;
-                for (i = 6; i <= NF; i++) path = path " " \$i;
-                print id "\t" path;
+            echo "\$gaf_out" | awk '\$1 ~ /^[0-9]+\$/ {
+                id = \$1; path = ""; view = "";
+                for (i = 2; i <= NF; i++) {
+                    if (\$i ~ /^\//) {
+                        view = \$(i - 1);
+                        path = \$i;
+                        for (j = i + 1; j <= NF; j++) path = path " " \$j;
+                        break;
+                    }
+                }
+                if (view ~ /unkn/ && path != "/" && path != "/Trash") {
+                    print id "\t" path;
+                }
             }' | while IFS=$'\t' read -r fid fpath; do
                 if [ -n "\$fid" ] && [ -n "\$fpath" ]; then
                     zmsoap -z -m "$TARGET_ACCOUNT" FolderActionRequest/action @id="\$fid" @op="update" @view="message" >/dev/null 2>&1
@@ -419,35 +449,40 @@ process_account() {
 
         while read -r dir; do
             # Get relative path to extraction folder
-            rel_path=\${dir#\$TEMP_ROOT/}
+            rel_path=\${dir#\$TEMP_ROOT}
+            rel_path=\${rel_path#/}
             
             # Clean Zimbra shard suffixes (!1, !2, !4, etc.) from all path segments
-            clean_path=\$(echo "\$rel_path" | sed -E 's/![0-9]+(\/|$)/\1/g')
+            clean_path=\$(echo "\$rel_path" | sed -E 's/![0-9]+(\/|$)/\1/g' | tr -d '":')
 
-            # Separate top-level folder name and subpath
-            top_level=\$(echo "\$clean_path" | cut -d/ -f1)
-            sub_path=\$(echo "\$clean_path" | cut -s -d/ -f2-)
-            
-            # Normalize top-level folder: map standard folders, place all other custom folders under Archive
-            case "\$top_level" in
-                Inbox|[iI]nbox) target_base="Inbox" ;;
-                Sent|[sS]ent|[sS]end) target_base="Sent" ;;
-                Drafts|[dD]rafts) target_base="Drafts" ;;
-                Trash|[tT]rash) target_base="Trash" ;;
-                Junk|[jJ]unk|[sS]pam) target_base="Junk" ;;
-                Archive|[aA]rchive|[aA]rchieve) target_base="Archive" ;;
-                Contacts|[cC]ontacts) target_base="Contacts" ;;
-                Calendar|[cC]alendar) target_base="Calendar" ;;
-                Tasks|[tT]asks) target_base="Tasks" ;;
-                Briefcase|[bB]riefcase) target_base="Briefcase" ;;
-                *) target_base="Archive/\$top_level" ;; # Put all other custom folders inside Archive
-            esac
-            
-            # Recombine with subpath if present
-            if [ -n "\$sub_path" ]; then
-                target_folder="/\$target_base/\$sub_path"
+            if [ -z "\$clean_path" ]; then
+                target_folder="/Inbox"
             else
-                target_folder="/\$target_base"
+                # Separate top-level folder name and subpath
+                top_level=\$(echo "\$clean_path" | cut -d/ -f1)
+                sub_path=\$(echo "\$clean_path" | cut -s -d/ -f2-)
+                
+                # Normalize top-level folder: map standard folders, place all other custom folders under Archive
+                case "\$top_level" in
+                    Inbox|[iI]nbox) target_base="Inbox" ;;
+                    Sent|[sS]ent|[sS]end) target_base="Sent" ;;
+                    Drafts|[dD]rafts) target_base="Drafts" ;;
+                    Trash|[tT]rash) target_base="Trash" ;;
+                    Junk|[jJ]unk|[sS]pam) target_base="Junk" ;;
+                    Archive|[aA]rchive|[aA]rchieve) target_base="Archive" ;;
+                    Contacts|[cC]ontacts) target_base="Contacts" ;;
+                    Calendar|[cC]alendar) target_base="Calendar" ;;
+                    Tasks|[tT]asks) target_base="Tasks" ;;
+                    Briefcase|[bB]riefcase) target_base="Briefcase" ;;
+                    *) target_base="Archive/\$top_level" ;; # Put all other custom folders inside Archive
+                esac
+                
+                # Recombine with subpath if present
+                if [ -n "\$sub_path" ]; then
+                    target_folder="/\$target_base/\$sub_path"
+                else
+                    target_folder="/\$target_base"
+                fi
             fi
 
             folder_display="\${target_folder#/}"
@@ -479,11 +514,11 @@ process_account() {
                 fi
 
                 # Extract Message-ID to prevent duplicates
-                msg_id=\$(grep -i -m 1 "^Message-ID:" "\$f" | sed -E 's/^Message-ID:[[:space:]]*//I' | tr -d '<>\r')
+                msg_id=\$(grep -i -m 1 "^Message-ID:" "\$f" | sed -E 's/^Message-ID:[[:space:]]*//I' | tr -d '<>\r"\ '\''\\')
                 
                 if [ -n "\$msg_id" ]; then
                     # Check if message with same Message-ID already exists in target folder
-                    search_res=\$(zmmailbox -z -m "$TARGET_ACCOUNT" search -l 1 "in:\"\$target_folder\" msgid:\$msg_id" 2>/dev/null)
+                    search_res=\$(zmmailbox -z -m "$TARGET_ACCOUNT" search -l 1 "in:\"\$target_folder\" msgid:\"\$msg_id\"" 2>/dev/null)
                     found_count=\$(echo "\$search_res" | grep -i "^num:" | awk '{print \$2}' | tr -d ',')
                     
                     if [ -n "\$found_count" ] && [ "\$found_count" -gt 0 ]; then
@@ -741,6 +776,9 @@ while IFS=',' read -r TARGET_ACCOUNT TGZ_FILE; do
     TGZ_FILE=$(echo "$TGZ_FILE" | xargs)
     
     [ -z "$TARGET_ACCOUNT" ] || [ -z "$TGZ_FILE" ] && continue
+    case "$TARGET_ACCOUNT" in
+        \#*|[aA]ccount|[eE]mail|TARGET_ACCOUNT) continue ;; # Skip comments and header rows
+    esac
 
     process_account "$TARGET_ACCOUNT" "$TGZ_FILE" &
 
