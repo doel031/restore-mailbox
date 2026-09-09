@@ -150,8 +150,10 @@ process_account() {
         chmod 777 "$TEMP_EXTRACT_DIR"
         tar -xzf "$TGZ_FILE" -C "$TEMP_EXTRACT_DIR"
 
-        # Count total files (messages)
+        # Count total files (messages) and calculate extracted backup size
         local total_msgs=$(find "$TEMP_EXTRACT_DIR" -type f -not -name "*.meta" 2>/dev/null | wc -l | tr -d ' ')
+        local backup_kb=$(du -sk "$TEMP_EXTRACT_DIR" 2>/dev/null | awk '{print $1}')
+        local backup_bytes=$((backup_kb * 1024))
         find "$TEMP_EXTRACT_DIR" -mindepth 1 -type d | sort > "$TEMP_EXTRACT_DIR/.dirlist"
         chmod 666 "$TEMP_EXTRACT_DIR/.dirlist"
         echo "0/$total_msgs Starting..." > "$PROGRESS_DIR/$TARGET_ACCOUNT"
@@ -165,12 +167,95 @@ process_account() {
         fi
         TEMP_ROOT="$TEMP_EXTRACT_DIR"
         total_msgs="$total_msgs"
+        backup_bytes="$backup_bytes"
         count=0
         imported=0
         duplicate=0
         failed=0
         quota_hit=0
         rm -f "\$TEMP_ROOT/.folder_records"
+
+        # Query mailbox quota limit and current mailbox usage
+        quota_bytes=\$(zmprov ga "$TARGET_ACCOUNT" zimbraMailQuota 2>/dev/null | awk '/^zimbraMailQuota:/ {print \$2}')
+        [ -z "\$quota_bytes" ] && quota_bytes=0
+
+        used_bytes=\$(zmprov gmi "$TARGET_ACCOUNT" 2>/dev/null | awk '/^quotaUsed:/ {print \$2}')
+        if [ -z "\$used_bytes" ]; then
+            used_bytes=\$(zmmailbox -z -m "$TARGET_ACCOUNT" gms 2>/dev/null | grep -oE '[0-9]+' | tail -n 1)
+            [ -z "\$used_bytes" ] && used_bytes=0
+        fi
+
+        fmt_bytes() {
+            local b=\$1
+            if [ -z "\$b" ] || [ "\$b" -le 0 ] 2>/dev/null; then
+                echo "0 B"
+            elif [ "\$b" -ge 1073741824 ]; then
+                awk -v b="\$b" 'BEGIN { printf "%.2f GB", b / 1073741824 }'
+            elif [ "\$b" -ge 1048576 ]; then
+                awk -v b="\$b" 'BEGIN { printf "%.2f MB", b / 1048576 }'
+            elif [ "\$b" -ge 1024 ]; then
+                awk -v b="\$b" 'BEGIN { printf "%.2f KB", b / 1024 }'
+            else
+                echo "\${b} B"
+            fi
+        }
+
+        get_current_usage() {
+            local cur_u=\$(zmprov gmi "$TARGET_ACCOUNT" 2>/dev/null | awk '/^quotaUsed:/ {print \$2}')
+            if [ -z "\$cur_u" ]; then
+                cur_u=\$(zmmailbox -z -m "$TARGET_ACCOUNT" gms 2>/dev/null | grep -oE '[0-9]+' | tail -n 1)
+            fi
+            if [ -n "\$cur_u" ]; then
+                used_bytes="\$cur_u"
+            fi
+        }
+
+        log_quota_details() {
+            get_current_usage
+            local ts_q=\$(date '+%H:%M:%S')
+            local cur_used_f=\$(fmt_bytes "\$used_bytes")
+            local backup_f=\$(fmt_bytes "\$backup_bytes")
+            local total_needed=\$((used_bytes + backup_bytes))
+            local total_needed_f=\$(fmt_bytes "\$total_needed")
+
+            if [ "\$quota_bytes" -gt 0 ]; then
+                local quota_f=\$(fmt_bytes "\$quota_bytes")
+                local deficit=\$((total_needed - quota_bytes))
+                if [ "\$deficit" -gt 0 ]; then
+                    local deficit_f=\$(fmt_bytes "\$deficit")
+                    local rec_bytes=\$(awk -v tn="\$total_needed" 'BEGIN { printf "%.0f", tn * 1.10 }')
+                    local rec_f=\$(fmt_bytes "\$rec_bytes")
+
+                    printf "[%s] [QUOTA] ── Quota & Storage Details (%s) ──\n" "\$ts_q" "$TARGET_ACCOUNT"
+                    printf "[%s] [QUOTA]   • Mailbox Quota Limit : %s (%s bytes)\n" "\$ts_q" "\$quota_f" "\$quota_bytes"
+                    printf "[%s] [QUOTA]   • Current Mailbox Used: %s\n" "\$ts_q" "\$cur_used_f"
+                    printf "[%s] [QUOTA]   • Backup Data to Add  : %s\n" "\$ts_q" "\$backup_f"
+                    printf "[%s] [QUOTA]   • Est. Total Required : %s (Used + Backup)\n" "\$ts_q" "\$total_needed_f"
+                    printf "[%s] [QUOTA]   • Deficit / Kekurangan: ⚠️ KURANG %s (Mailbox Full!)\n" "\$ts_q" "\$deficit_f"
+                    printf "[%s] [QUOTA]   • Recommended Quota   : Minimum %s (+10%% buffer)\n" "\$ts_q" "\$rec_f"
+                    printf "[%s] [QUOTA]   • Increase Quota Cmd  : zmprov ma %s zimbraMailQuota %s\n" "\$ts_q" "$TARGET_ACCOUNT" "\$rec_bytes"
+                else
+                    local rec_bytes=\$(awk -v tn="\$total_needed" -v q="\$quota_bytes" 'BEGIN { base = (tn > q) ? tn : q; printf "%.0f", base * 1.25 }')
+                    local rec_f=\$(fmt_bytes "\$rec_bytes")
+
+                    printf "[%s] [QUOTA] ── Quota & Storage Details (%s) ──\n" "\$ts_q" "$TARGET_ACCOUNT"
+                    printf "[%s] [QUOTA]   • Mailbox Quota Limit : %s (%s bytes)\n" "\$ts_q" "\$quota_f" "\$quota_bytes"
+                    printf "[%s] [QUOTA]   • Current Mailbox Used: %s\n" "\$ts_q" "\$cur_used_f"
+                    printf "[%s] [QUOTA]   • Backup Data to Add  : %s\n" "\$ts_q" "\$backup_f"
+                    printf "[%s] [QUOTA]   • Est. Total Required : %s (Used + Backup)\n" "\$ts_q" "\$total_needed_f"
+                    printf "[%s] [QUOTA]   • Status              : ⚠️ Batas kuota server tercapai saat import pesan!\n" "\$ts_q"
+                    printf "[%s] [QUOTA]   • Recommended Quota   : Naikkan kuota ke %s atau 0 (Unlimited)\n" "\$ts_q" "\$rec_f"
+                    printf "[%s] [QUOTA]   • Increase Quota Cmd  : zmprov ma %s zimbraMailQuota %s\n" "\$ts_q" "$TARGET_ACCOUNT" "\$rec_bytes"
+                fi
+            else
+                printf "[%s] [QUOTA] ── Quota & Storage Details (%s) ──\n" "\$ts_q" "$TARGET_ACCOUNT"
+                printf "[%s] [QUOTA]   • Mailbox Quota Limit : Unlimited (0)\n" "\$ts_q"
+                printf "[%s] [QUOTA]   • Current Mailbox Used: %s\n" "\$ts_q" "\$cur_used_f"
+                printf "[%s] [QUOTA]   • Backup Data to Add  : %s\n" "\$ts_q" "\$backup_f"
+                printf "[%s] [QUOTA]   • Est. Total Required : %s (Used + Backup)\n" "\$ts_q" "\$total_needed_f"
+                printf "[%s] [QUOTA]   • Note: Mailbox quota is unlimited, check server disk/domain limits.\n" "\$ts_q"
+            fi
+        }
 
         # Default folders list to prevent redundant createFolder calls
         created_folders="
@@ -210,6 +295,7 @@ process_account() {
                     elif echo "\$cf_out" | grep -qiE "QUOTA_EXCEEDED|quota exceeded|mailbox is full"; then
                         quota_hit=1
                         printf "[%s] [QUOTA] ⚠️ Mailbox quota exceeded while creating folder: %s!\n" "\$ts_f" "\$current"
+                        log_quota_details
                         return 1
                     elif echo "\$cf_out" | grep -qi "already_exists"; then
                         if [ "$MAIL_PLATFORM" = "Carbonio" ]; then
@@ -400,6 +486,7 @@ process_account() {
                         quota_hit=1
                         printf "[%s] [FAIL] %s/%s - \"%s\" (Error: %s)\n" "\$ts" "\$folder_display" "\$fname" "\$subject" "\$err_msg"
                         printf "[%s] [QUOTA] ⚠️ Mailbox quota exceeded for %s! Halting import for this account.\n" "\$ts" "$TARGET_ACCOUNT"
+                        log_quota_details
                         count=\$((count + 1))
                         f_recorded=1
                         echo "\$folder_display|\$f_new|\$f_dup|\$f_fail" >> "\$TEMP_ROOT/.folder_records"
@@ -416,6 +503,7 @@ process_account() {
                 echo "\$folder_display|\$f_new|\$f_dup|\$f_fail" >> "\$TEMP_ROOT/.folder_records"
             fi
         done < "\$TEMP_ROOT/.dirlist"
+        get_current_usage
         if [ "\$quota_hit" -eq 1 ]; then
             failed=\$((total_msgs - imported - duplicate))
             [ "\$failed" -lt 0 ] && failed=0
@@ -423,13 +511,17 @@ process_account() {
         else
             echo "\$count/\$total_msgs Completed" > "$PROGRESS_DIR/$TARGET_ACCOUNT"
         fi
-        echo "\$total_msgs:\$imported:\$duplicate:\$failed:\$quota_hit" > "\$TEMP_ROOT/.stat"
+        echo "\$total_msgs:\$imported:\$duplicate:\$failed:\$quota_hit:\$used_bytes:\$quota_bytes:\$backup_bytes" > "\$TEMP_ROOT/.stat"
 EOF
 
         local total="$total_msgs" imported=0 duplicate=0 failed=0 quota_hit=0
+        local used_bytes=0 quota_bytes=0 backup_bytes_stat="$backup_bytes"
         if [ -f "$TEMP_EXTRACT_DIR/.stat" ]; then
-            IFS=':' read -r total imported duplicate failed quota_hit < "$TEMP_EXTRACT_DIR/.stat"
+            IFS=':' read -r total imported duplicate failed quota_hit used_bytes quota_bytes backup_bytes_stat < "$TEMP_EXTRACT_DIR/.stat"
         fi
+        [ -z "$backup_bytes_stat" ] && backup_bytes_stat="$backup_bytes"
+        [ -z "$used_bytes" ] && used_bytes=0
+        [ -z "$quota_bytes" ] && quota_bytes=0
 
         rm -f "$PROGRESS_DIR/$TARGET_ACCOUNT"
 
@@ -445,9 +537,23 @@ EOF
             duration_str="${dur_sec}s"
         fi
 
+        local used_gb=$(awk -v b="$used_bytes" 'BEGIN { if (b >= 1073741824) printf "%.2f GB", b / 1073741824; else if (b >= 1048576) printf "%.2f MB", b / 1048576; else printf "%.2f KB", b / 1024 }')
+        local backup_gb=$(awk -v b="$backup_bytes_stat" 'BEGIN { if (b >= 1073741824) printf "%.2f GB", b / 1073741824; else if (b >= 1048576) printf "%.2f MB", b / 1048576; else printf "%.2f KB", b / 1024 }')
+        local total_req_gb=$(awk -v u="$used_bytes" -v b="$backup_bytes_stat" 'BEGIN { tot = u + b; if (tot >= 1073741824) printf "%.2f GB", tot / 1073741824; else if (tot >= 1048576) printf "%.2f MB", tot / 1048576; else printf "%.2f KB", tot / 1024 }')
+        local quota_desc="Unlimited"
+        local deficit_desc=""
+        if [ "$quota_bytes" -gt 0 ]; then
+            quota_desc=$(awk -v q="$quota_bytes" 'BEGIN { if (q >= 1073741824) printf "%.2f GB", q / 1073741824; else printf "%.2f MB", q / 1048576 }')
+            local def_b=$((used_bytes + backup_bytes_stat - quota_bytes))
+            if [ "$def_b" -gt 0 ]; then
+                local def_gb=$(awk -v d="$def_b" 'BEGIN { if (d >= 1073741824) printf "%.2f GB", d / 1073741824; else printf "%.2f MB", d / 1048576 }')
+                deficit_desc=" [Deficit: $def_gb]"
+            fi
+        fi
+
         if [ "$quota_hit" -eq 1 ]; then
             echo "[$end_time_str] Stopped for account: $TARGET_ACCOUNT (QUOTA EXCEEDED)"
-            echo "⚠️ QUOTA EXCEEDED: $TARGET_ACCOUNT (Total: $total, Imported: $imported, Duplicate: $duplicate, Failed/Unimported: $failed - Mailbox Full)" >> "$SUMMARY_LOG"
+            echo "⚠️ QUOTA EXCEEDED: $TARGET_ACCOUNT (Total: $total, Imported: $imported, Duplicate: $duplicate, Failed/Unimported: $failed - Mailbox Full | Used: $used_gb / $quota_desc, Backup: $backup_gb, Est. Needed: $total_req_gb$deficit_desc)" >> "$SUMMARY_LOG"
         elif [ "$failed" -gt 0 ]; then
             echo "[$end_time_str] Completed for account: $TARGET_ACCOUNT (WITH ERRORS)"
             echo "⚠️ WITH ERRORS: $TARGET_ACCOUNT (Total: $total, Imported: $imported, Duplicate: $duplicate, Failed: $failed)" >> "$SUMMARY_LOG"
@@ -471,7 +577,17 @@ EOF
             -v imp="$imported" \
             -v dup="$duplicate" \
             -v fail="$failed" \
-            -v quota="$quota_hit" '
+            -v quota="$quota_hit" \
+            -v used="$used_bytes" \
+            -v quota_limit="$quota_bytes" \
+            -v backup="$backup_bytes_stat" '
+        function fmt_size(b) {
+            if (b <= 0) return "0 B";
+            if (b >= 1073741824) return sprintf("%.2f GB", b / 1073741824);
+            if (b >= 1048576) return sprintf("%.2f MB", b / 1048576);
+            if (b >= 1024) return sprintf("%.2f KB", b / 1024);
+            return sprintf("%d B", b);
+        }
         BEGIN {
             order["Inbox"] = 1; names[1] = "Inbox"
             order["Sent"] = 2; names[2] = "Sent"
@@ -520,6 +636,49 @@ EOF
                 } else {
                     printf "   • Failed         : %d messages %s\n", fail, fail_pct
                 }
+            }
+            printf "-------------------------------------------------------------------------------\n"
+            printf " STORAGE & QUOTA ANALYSIS:\n"
+            used_f = fmt_size(used)
+            backup_f = fmt_size(backup)
+            tot_req = used + backup
+            tot_req_f = fmt_size(tot_req)
+
+            if (quota_limit > 0) {
+                quota_f = fmt_size(quota_limit)
+                used_pct = sprintf("(%.1f%%)", (used * 100.0) / quota_limit)
+                printf "   • Mailbox Quota Limit : %-12s (%.0f bytes)\n", quota_f, quota_limit
+                printf "   • Current Mailbox Used: %-12s %s\n", used_f, used_pct
+                printf "   • Backup Data Size    : %-12s (Ekstraksi dari .tgz)\n", backup_f
+                printf "   • Est. Space Needed   : %-12s (Pemakaian saat ini + Data backup)\n", tot_req_f
+                
+                deficit = tot_req - quota_limit
+                if (deficit > 0) {
+                    deficit_f = fmt_size(deficit)
+                    rec_bytes = sprintf("%.0f", tot_req * 1.10)
+                    rec_f = fmt_size(rec_bytes)
+                    printf "   • Status / Deficit    : ⚠️ KURANG %s (Mailbox tidak muat!)\n", deficit_f
+                    printf "   • Rekomendasi Quota   : Minimum %s (Disarankan +10%% buffer)\n", rec_f
+                    printf "   • Perintah Update     : zmprov ma %s zimbraMailQuota %.0f\n", acc, rec_bytes
+                } else if (quota == 1) {
+                    base_bytes = (tot_req > quota_limit) ? tot_req : quota_limit
+                    rec_bytes = sprintf("%.0f", base_bytes * 1.25)
+                    rec_f = fmt_size(rec_bytes)
+                    printf "   • Status / Deficit    : ⚠️ KUOTA TERCAPAI (Server menolak penambahan pesan)\n"
+                    printf "   • Rekomendasi Quota   : Naikkan ke %s atau 0 (Unlimited)\n", rec_f
+                    printf "   • Perintah Update     : zmprov ma %s zimbraMailQuota %.0f\n", acc, rec_bytes
+                } else {
+                    remaining = quota_limit - tot_req
+                    rem_f = fmt_size(remaining)
+                    printf "   • Sisa Kuota Aman     : %-12s (Setelah semua pesan direstore)\n", rem_f
+                    printf "   • Status              : ✅ Kuota mailbox mencukupi\n"
+                }
+            } else {
+                printf "   • Mailbox Quota Limit : Unlimited (0)\n"
+                printf "   • Current Mailbox Used: %s\n", used_f
+                printf "   • Backup Data Size    : %s (Ekstraksi dari .tgz)\n", backup_f
+                printf "   • Est. Space Needed   : %s (Pemakaian saat ini + Data backup)\n", tot_req_f
+                printf "   • Status              : ✅ Kuota akun Unlimited (Cek kapasitas disk server)\n"
             }
             printf "-------------------------------------------------------------------------------\n"
             printf " FOLDER BREAKDOWN:\n"
@@ -574,20 +733,26 @@ echo "=================================================="
 if [ -f "$SUMMARY_LOG" ]; then
     cat "$SUMMARY_LOG" | sort
     
-    success_count=$(grep -c "✅ SUCCESS" "$SUMMARY_LOG" 2>/dev/null || echo 0)
-    fail_count=$(grep -c "❌ FAILED" "$SUMMARY_LOG" 2>/dev/null || echo 0)
-    total_accounts=$((success_count + fail_count))
+    success_count=$(grep "✅ SUCCESS" "$SUMMARY_LOG" 2>/dev/null | wc -l | tr -d ' ')
+    quota_count=$(grep "⚠️ QUOTA EXCEEDED" "$SUMMARY_LOG" 2>/dev/null | wc -l | tr -d ' ')
+    error_count=$(grep "⚠️ WITH ERRORS" "$SUMMARY_LOG" 2>/dev/null | wc -l | tr -d ' ')
+    fail_count=$(grep "❌ FAILED" "$SUMMARY_LOG" 2>/dev/null | wc -l | tr -d ' ')
+    total_accounts=$((success_count + quota_count + error_count + fail_count))
 
-    tot_msgs=$(awk -F'Total: ' '{print $2}' "$SUMMARY_LOG" | awk -F',' '{sum += $1} END {print sum+0}')
-    tot_imported=$(awk -F'Imported: ' '{print $2}' "$SUMMARY_LOG" | awk -F',' '{sum += $1} END {print sum+0}')
-    tot_duplicate=$(awk -F'Duplicate: ' '{print $2}' "$SUMMARY_LOG" | awk -F')' '{sum += $1} END {print sum+0}')
+    tot_msgs=$(awk -F'Total: ' '{print $2}' "$SUMMARY_LOG" | awk -F'[,)]' '{sum += $1} END {print sum+0}')
+    tot_imported=$(awk -F'Imported: ' '{print $2}' "$SUMMARY_LOG" | awk -F'[,)]' '{sum += $1} END {print sum+0}')
+    tot_duplicate=$(awk -F'Duplicate: ' '{print $2}' "$SUMMARY_LOG" | awk -F'[,)]' '{sum += $1} END {print sum+0}')
+    tot_failed=$(awk -F'Failed[^:]*: ' '{print $2}' "$SUMMARY_LOG" | awk -F'[, -)]' '{sum += $1} END {print sum+0}')
 
     echo "--------------------------------------------------"
     echo "Mail Server Platform : $MAIL_PLATFORM (User: $MAIL_USER)"
-    echo "Total Accounts       : $total_accounts (Success: $success_count, Failed: $fail_count)"
+    echo "Total Accounts       : $total_accounts (Success: $success_count, Quota Exceeded: $quota_count, Errors: $error_count, Failed: $fail_count)"
     echo "Total Messages       : $tot_msgs"
     echo "Total Imported       : $tot_imported"
     echo "Total Duplicates     : $tot_duplicate"
+    if [ "$tot_failed" -gt 0 ]; then
+        echo "Total Failed/Unsaved : $tot_failed"
+    fi
 else
     echo "No summary data available."
 fi
