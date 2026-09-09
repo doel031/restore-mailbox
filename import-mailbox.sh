@@ -195,17 +195,28 @@ process_account() {
             for part in "\${parts[@]}"; do
                 current="\$current/\$part"
                 if ! echo "\$created_folders" | grep -qx "\$current"; then
-                    cf_out=\$(zmmailbox -z -m "$TARGET_ACCOUNT" createFolder "\$current" 2>&1)
+                    cf_out=\$(zmmailbox -z -m "$TARGET_ACCOUNT" createFolder --view message "\$current" 2>&1)
                     cf_status=\$?
                     ts_f=\$(date '+%H:%M:%S')
 
                     if [ \$cf_status -eq 0 ]; then
-                        folder_id=\$(echo "\$cf_out" | tr -d ' \r\n')
+                        folder_id=\$(echo "\$cf_out" | grep -v 'INFO' | grep -v 'DEBUG' | grep -Eo '^[0-9]+' | head -n 1)
+                        [ -z "\$folder_id" ] && folder_id="OK"
                         printf "[%s] [FOLDER] Created: %s (ID: %s)\n" "\$ts_f" "\$current" "\$folder_id"
                     elif echo "\$cf_out" | grep -qi "already_exists"; then
-                        :
+                        # If folder already exists, ensure its view is set to message (in case it was created as unknown)
+                        gf_res=\$(zmmailbox -z -m "$TARGET_ACCOUNT" getFolder "\$current" 2>/dev/null)
+                        gf_view=\$(echo "\$gf_res" | grep -m 1 '"view"' | sed -E 's/.*"view":[[:space:]]*"([^"]+)".*/\1/')
+                        if [ -n "\$gf_view" ] && [ "\$gf_view" != "message" ]; then
+                            gf_id=\$(echo "\$gf_res" | grep -m 1 '"id"' | sed -E 's/.*"id":[[:space:]]*"([^"]+)".*/\1/')
+                            if [ -n "\$gf_id" ]; then
+                                zmsoap -z -m "$TARGET_ACCOUNT" FolderActionRequest/action @id="\$gf_id" @op="update" @view="message" >/dev/null 2>&1
+                                printf "[%s] [FOLDER] Repaired view to 'message': %s (ID: %s)\n" "\$ts_f" "\$current" "\$gf_id"
+                            fi
+                        fi
                     else
-                        cf_err=\$(echo "\$cf_out" | head -n 1 | tr -d '\r\n')
+                        cf_err=\$(echo "\$cf_out" | grep -v 'INFO' | grep -v 'DEBUG' | head -n 1 | tr -d '\r\n')
+                        [ -z "\$cf_err" ] && cf_err=\$(echo "\$cf_out" | head -n 1 | tr -d '\r\n')
                         printf "[%s] [FOLDER] Failed to create: %s (Error: %s)\n" "\$ts_f" "\$current" "\$cf_err"
                     fi
 
@@ -214,6 +225,20 @@ process_account() {
                 fi
             done
         }
+
+        # Pre-scan and repair any existing custom folders with 'unkn' view so they are visible in Webmail
+        gaf_out=\$(zmmailbox -z -m "$TARGET_ACCOUNT" gaf 2>/dev/null)
+        echo "\$gaf_out" | awk '\$2 == "unkn" && \$5 != "/" && \$5 != "/Trash" && \$1 ~ /^[0-9]+\$/ {
+            id = \$1;
+            path = \$5;
+            for (i = 6; i <= NF; i++) path = path " " \$i;
+            print id "\t" path;
+        }' | while IFS=$'\t' read -r fid fpath; do
+            if [ -n "\$fid" ] && [ -n "\$fpath" ]; then
+                zmsoap -z -m "$TARGET_ACCOUNT" FolderActionRequest/action @id="\$fid" @op="update" @view="message" >/dev/null 2>&1
+                printf "[%s] [FOLDER] Repaired view to 'message': %s (ID: %s)\n" "\$(date '+%H:%M:%S')" "\$fpath" "\$fid"
+            fi
+        done
 
         while read -r dir; do
             # Get relative path to extraction folder
@@ -289,12 +314,14 @@ process_account() {
                 add_status=\$?
 
                 if [ \$add_status -eq 0 ]; then
-                    item_id=\$(echo "\$add_res" | tr -d ' \r\n')
+                    item_id=\$(echo "\$add_res" | grep -v 'INFO' | grep -v 'DEBUG' | grep -Eo '^[0-9]+' | head -n 1)
+                    [ -z "\$item_id" ] && item_id=\$(echo "\$add_res" | tr -d ' \r\n')
                     printf "[%s] [OK]   %s/%s - \"%s\" (ID: %s)\n" "\$ts" "\$folder_display" "\$fname" "\$subject" "\$item_id"
                     imported=\$((imported + 1))
                     f_new=\$((f_new + 1))
                 else
-                    err_msg=\$(echo "\$add_res" | head -n 1 | tr -d '\r\n')
+                    err_msg=\$(echo "\$add_res" | grep -v 'INFO' | grep -v 'DEBUG' | head -n 1 | tr -d '\r\n')
+                    [ -z "\$err_msg" ] && err_msg=\$(echo "\$add_res" | head -n 1 | tr -d '\r\n')
                     printf "[%s] [FAIL] %s/%s - \"%s\" (Error: %s)\n" "\$ts" "\$folder_display" "\$fname" "\$subject" "\$err_msg"
                 fi
 
