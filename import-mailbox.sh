@@ -1,19 +1,19 @@
 #!/bin/bash
 
-# Pastikan dijalankan sebagai root
+# Ensure running as root
 if [ "$EUID" -ne 0 ]; then
-    echo "Harap jalankan skrip ini sebagai root!"
+    echo "Error: Please run this script as root!"
     exit 1
 fi
 
 INPUT_FILE="$1"
 if [ -z "$INPUT_FILE" ] || [ ! -f "$INPUT_FILE" ]; then
-    echo "Gagal: File input tidak ditemukan atau belum ditentukan!"
-    echo "Penggunaan: $0 /path/ke/file_input.txt"
+    echo "Error: Input file not found or not specified!"
+    echo "Usage: $0 /path/to/input_file.csv"
     exit 1
 fi
 
-# Deteksi platform mail server: Carbonio (user: zextras) atau Zimbra (user: zimbra)
+# Detect mail server platform: Carbonio (user: zextras) or Zimbra (user: zimbra)
 if [ -n "$MAIL_USER" ]; then
     if [ "$MAIL_USER" = "zextras" ]; then
         MAIL_PLATFORM="Carbonio"
@@ -39,15 +39,15 @@ elif [ -d "/opt/zimbra" ]; then
     MAIL_PLATFORM="Zimbra"
     MAIL_USER="zimbra"
 else
-    echo "Gagal: Tidak dapat mendeteksi mail server (Zimbra atau Carbonio tidak ditemukan)!"
-    echo "Pastikan sistem memiliki user 'zimbra' atau 'zextras'."
+    echo "Error: Unable to detect mail server (Zimbra or Carbonio not found)!"
+    echo "Please ensure 'zimbra' or 'zextras' user exists on the system."
     exit 1
 fi
 
 BASE_LOG_DIR="/var/log/restore-mailbox"
 mkdir -p "$BASE_LOG_DIR"
 
-# Cari nomor batch tertinggi yang sudah ada untuk membuat batch berikutnya
+# Find highest existing batch number to create the next batch directory
 max_batch=0
 for dir in "$BASE_LOG_DIR"/batch-*; do
     if [ -d "$dir" ]; then
@@ -66,11 +66,11 @@ LOG_DIR="$BASE_LOG_DIR/batch-$next_batch"
 mkdir -p "$LOG_DIR"
 
 SUMMARY_LOG="$LOG_DIR/summary_report.txt"
-> "$SUMMARY_LOG" # Bersihkan file summary
+> "$SUMMARY_LOG" # Reset summary file
 
 PROGRESS_DIR="$LOG_DIR/progress"
 mkdir -p "$PROGRESS_DIR"
-chmod 777 "$PROGRESS_DIR" # Agar bisa ditulis oleh user mail (zimbra/zextras)
+chmod 777 "$PROGRESS_DIR" # Allow write access for mail user (zimbra/zextras)
 rm -f "$PROGRESS_DIR"/* 2>/dev/null
 
 RESTORE_TEMP_BASE="/tmp/restore"
@@ -82,7 +82,7 @@ MAX_PARALLEL=10
 print_status() {
     clear
     echo "=================================================="
-    echo "      STATUS RESTORE BERJALAN [$(basename "$LOG_DIR")]"
+    echo "      ACTIVE RESTORE STATUS [$(basename "$LOG_DIR")]"
     echo "      Platform: $MAIL_PLATFORM (User: $MAIL_USER)"
     echo "=================================================="
     local active_jobs=0
@@ -98,29 +98,29 @@ print_status() {
         fi
     done
     if [ "$active_jobs" -eq 0 ]; then
-        echo "Memulai proses..."
+        echo "Starting processes..."
     fi
     echo "=================================================="
 }
 
 
-# Fungsi untuk menangani Ctrl+C (SIGINT) agar membunuh seluruh child process dan membersihkan cache
+# Handle SIGINT (Ctrl+C) and SIGTERM to kill all child processes and clean up cache
 cleanup() {
     echo ""
-    echo "[!] Proses dihentikan oleh pengguna (Ctrl+C). Membersihkan background jobs..."
-    # Mematikan seluruh proses anak/background yang berjalan dari skrip ini
+    echo "[!] Process interrupted by user (Ctrl+C). Terminating background jobs..."
+    # Kill all child/background processes spawned by this script
     pkill -P $$ 2>/dev/null
     wait 2>/dev/null
 
-    echo "[!] Membersihkan folder cache dan file sementara..."
+    echo "[!] Cleaning up cache and temporary files..."
     rm -rf "$RESTORE_TEMP_BASE"/* 2>/dev/null
     rm -f "$PROGRESS_DIR"/* 2>/dev/null
 
-    echo "[!] Semua proses dihentikan dan file cache sementara telah dibersihkan."
+    echo "[!] All processes stopped and temporary files cleaned up."
     exit 1
 }
 
-# Tangkap sinyal SIGINT (Ctrl+C) dan SIGTERM
+# Trap SIGINT (Ctrl+C) and SIGTERM
 trap cleanup SIGINT SIGTERM
 
 process_account() {
@@ -133,30 +133,30 @@ process_account() {
 
     {
         echo "=================================================="
-        echo "[$start_time_str] Memulai proses untuk akun: $TARGET_ACCOUNT"
+        echo "[$start_time_str] Starting restore for account: $TARGET_ACCOUNT"
         echo "=================================================="
 
         if [ ! -f "$TGZ_FILE" ]; then
-            echo "[ERROR] File backup .tgz tidak ditemukan di: $TGZ_FILE"
-            echo "❌ GAGAL: $TARGET_ACCOUNT (File .tgz tidak ditemukan)" >> "$SUMMARY_LOG"
+            echo "[ERROR] Backup file .tgz not found at: $TGZ_FILE"
+            echo "❌ FAILED: $TARGET_ACCOUNT (.tgz file not found)" >> "$SUMMARY_LOG"
             return
         fi
 
-        echo "Mengekstrak file backup..." > "$PROGRESS_DIR/$TARGET_ACCOUNT"
+        echo "Extracting backup archive..." > "$PROGRESS_DIR/$TARGET_ACCOUNT"
         chmod 666 "$PROGRESS_DIR/$TARGET_ACCOUNT"
 
-        echo "Mengekstrak file backup ke $TEMP_EXTRACT_DIR ..."
+        echo "Extracting backup archive to $TEMP_EXTRACT_DIR ..."
         mkdir -p "$TEMP_EXTRACT_DIR"
         chmod 777 "$TEMP_EXTRACT_DIR"
         tar -xzf "$TGZ_FILE" -C "$TEMP_EXTRACT_DIR"
 
-        # Hitung total file (pesan)
+        # Count total files (messages)
         local total_msgs=$(find "$TEMP_EXTRACT_DIR" -type f -not -name "*.meta" 2>/dev/null | wc -l | tr -d ' ')
         find "$TEMP_EXTRACT_DIR" -mindepth 1 -type d | sort > "$TEMP_EXTRACT_DIR/.dirlist"
         chmod 666 "$TEMP_EXTRACT_DIR/.dirlist"
-        echo "0/$total_msgs Mulai..." > "$PROGRESS_DIR/$TARGET_ACCOUNT"
+        echo "0/$total_msgs Starting..." > "$PROGRESS_DIR/$TARGET_ACCOUNT"
 
-        echo "Memulai import pesan ke mailbox ($MAIL_PLATFORM via user $MAIL_USER)..."
+        echo "Starting message import to mailbox ($MAIL_PLATFORM via user $MAIL_USER)..."
         su - "$MAIL_USER" <<EOF
         if [ "$MAIL_USER" = "zextras" ]; then
             export PATH="/opt/zextras/bin:\$PATH"
@@ -170,7 +170,7 @@ process_account() {
         duplicate=0
         rm -f "\$TEMP_ROOT/.folder_records"
 
-        # Daftar folder default untuk menghindari pemanggilan createFolder berulang
+        # Default folders list to prevent redundant createFolder calls
         created_folders="
 /Inbox
 /Sent
@@ -182,7 +182,7 @@ process_account() {
 /Tasks
 /Briefcase"
 
-        # Fungsi untuk memastikan folder induk dan folder turunan terbuat secara hierarkis (seperti mkdir -p)
+        # Ensure parent and nested folders exist hierarchically (like mkdir -p)
         ensure_folder() {
             local target="\$1"
             local clean="\${target#/}"
@@ -203,14 +203,14 @@ process_account() {
         }
 
         while read -r dir; do
-            # Dapatkan path relatif terhadap folder ekstrak
+            # Get relative path to extraction folder
             rel_path=\${dir#\$TEMP_ROOT/}
             
-            # Pisahkan nama folder utama (top level) dan subfoldernya
+            # Separate top-level folder name and subpath
             top_level=\$(echo "\$rel_path" | cut -d/ -f1)
             sub_path=\$(echo "\$rel_path" | cut -s -d/ -f2-)
             
-            # Normalisasi folder utama dari sharding (misal Inbox!123 menjadi Inbox)
+            # Normalize top-level folder from sharding (e.g. Inbox!123 to Inbox)
             case "\$top_level" in
                 Inbox|Inbox!*) target_base="Inbox" ;;
                 Sent|Sent!*) target_base="Sent" ;;
@@ -221,10 +221,10 @@ process_account() {
                 Calendar|Calendar!*) target_base="Calendar" ;;
                 Tasks|Tasks!*) target_base="Tasks" ;;
                 Briefcase|Briefcase!*) target_base="Briefcase" ;;
-                *) target_base="\$top_level" ;; # Biarkan folder kustom tetap apa adanya
+                *) target_base="\$top_level" ;; # Keep custom folder as is
             esac
             
-            # Gabungkan kembali dengan subfoldernya jika ada
+            # Recombine with subpath if present
             if [ -n "\$sub_path" ]; then
                 target_folder="/\$target_base/\$sub_path"
             else
@@ -235,7 +235,7 @@ process_account() {
             f_new=0
             f_dup=0
 
-            echo "[\$(date '+%H:%M:%S')] -> Memproses folder: \$target_folder"
+            echo "[\$(date '+%H:%M:%S')] -> Processing folder: \$target_folder"
             echo "\$count/\$total_msgs Import \$folder_display" > "$PROGRESS_DIR/$TARGET_ACCOUNT"
             ensure_folder "\$target_folder"
 
@@ -247,23 +247,23 @@ process_account() {
                 fname=\$(basename "\$f")
                 ts=\$(date '+%H:%M:%S')
 
-                # Dapatkan Subject email
+                # Extract email Subject
                 subject=\$(grep -i -m 1 "^Subject:" "\$f" | sed -E 's/^Subject:[[:space:]]*//I' | tr -d '\r')
-                [ -z "\$subject" ] && subject="(Tanpa Subjek)"
+                [ -z "\$subject" ] && subject="(No Subject)"
                 if [ \${#subject} -gt 50 ]; then
                     subject="\${subject:0:47}..."
                 fi
 
-                # Dapatkan Message-ID untuk menghindari duplikat
+                # Extract Message-ID to prevent duplicates
                 msg_id=\$(grep -i -m 1 "^Message-ID:" "\$f" | sed -E 's/^Message-ID:[[:space:]]*//I' | tr -d '<>\r')
                 
                 if [ -n "\$msg_id" ]; then
-                    # Cek apakah pesan dengan Message-ID yang sama sudah ada di mailbox
+                    # Check if message with same Message-ID already exists in mailbox
                     search_res=\$(zmmailbox -z -m "$TARGET_ACCOUNT" search -l 1 "msgid:\$msg_id" 2>/dev/null)
                     found_count=\$(echo "\$search_res" | grep -i "^num:" | awk '{print \$2}' | tr -d ',')
                     
                     if [ -n "\$found_count" ] && [ "\$found_count" -gt 0 ]; then
-                        printf "[%s] [SKIP] %s/%s - \"%s\" (Duplikat)\n" "\$ts" "\$folder_display" "\$fname" "\$subject"
+                        printf "[%s] [SKIP] %s/%s - \"%s\" (Duplicate)\n" "\$ts" "\$folder_display" "\$fname" "\$subject"
                         count=\$((count + 1))
                         duplicate=\$((duplicate + 1))
                         f_dup=\$((f_dup + 1))
@@ -290,7 +290,7 @@ process_account() {
             done
             echo "\$folder_display|\$f_new|\$f_dup" >> "\$TEMP_ROOT/.folder_records"
         done < "\$TEMP_ROOT/.dirlist"
-        echo "\$count/\$total_msgs Selesai" > "$PROGRESS_DIR/$TARGET_ACCOUNT"
+        echo "\$count/\$total_msgs Completed" > "$PROGRESS_DIR/$TARGET_ACCOUNT"
         echo "\$total_msgs:\$imported:\$duplicate" > "\$TEMP_ROOT/.stat"
 EOF
 
@@ -313,8 +313,8 @@ EOF
             duration_str="${dur_sec}s"
         fi
 
-        echo "[$end_time_str] Selesai untuk akun: $TARGET_ACCOUNT"
-        echo "✅ BERHASIL: $TARGET_ACCOUNT (Total: $total, Terimport: $imported, Duplikat: $duplicate)" >> "$SUMMARY_LOG"
+        echo "[$end_time_str] Completed for account: $TARGET_ACCOUNT"
+        echo "✅ SUCCESS: $TARGET_ACCOUNT (Total: $total, Imported: $imported, Duplicate: $duplicate)" >> "$SUMMARY_LOG"
         echo ""
 
         local record_file="$TEMP_EXTRACT_DIR/.folder_records"
@@ -350,22 +350,22 @@ EOF
             dup_pct = (tot > 0) ? sprintf("(%.1f%%)", (dup * 100.0) / tot) : "(0.0%)"
 
             printf "===============================================================================\n"
-            title = "LAPORAN RESTORE MAILBOX: " acc
+            title = "MAILBOX RESTORE REPORT: " acc
             pad = int((79 - length(title)) / 2)
             if (pad < 0) pad = 0
             printf "%*s%s\n", pad, "", title
             printf "===============================================================================\n"
-            printf " Waktu Mulai   : %-22s  Status       : ✅ SELESAI\n", start
-            printf " Waktu Selesai : %-22s  Durasi       : %s\n", end, dur
+            printf " Start Time    : %-22s  Status       : ✅ COMPLETED\n", start
+            printf " End Time      : %-22s  Duration     : %s\n", end, dur
             printf "-------------------------------------------------------------------------------\n"
-            printf " RINGKASAN:\n"
-            printf "   • Total Pesan : %d pesan\n", tot
-            printf "   • Pesan Baru  : %d pesan %s\n", imp, imp_pct
-            printf "   • Duplikat    : %d pesan %s\n", dup, dup_pct
+            printf " SUMMARY:\n"
+            printf "   • Total Messages : %d messages\n", tot
+            printf "   • New Messages   : %d messages %s\n", imp, imp_pct
+            printf "   • Duplicates     : %d messages %s\n", dup, dup_pct
             printf "-------------------------------------------------------------------------------\n"
-            printf " RINCIAN FOLDER:\n"
+            printf " FOLDER BREAKDOWN:\n"
             printf "┌────────────────────────────────┬──────────┬────────────────┬────────────────┐\n"
-            printf "│ Folder                         │    Total │       Baru (+) │   Duplikat (≈) │\n"
+            printf "│ Folder                         │    Total │        New (+) │  Duplicate (≈) │\n"
             printf "├────────────────────────────────┼──────────┼────────────────┼────────────────┤\n"
             for (i = 1; i <= count; i++) {
                 f = names[i]
@@ -381,7 +381,7 @@ EOF
         }' "$record_file"
         echo ""
 
-        echo "Menghapus file sementara di $TEMP_EXTRACT_DIR ..."
+        echo "Removing temporary files in $TEMP_EXTRACT_DIR ..."
         rm -rf "$TEMP_EXTRACT_DIR"
 
     } > "$ACCOUNT_LOG" 2>&1
@@ -410,28 +410,28 @@ wait
 print_status
 echo ""
 echo "=================================================="
-echo "              RINGKASAN HASIL IMPORT"
+echo "              IMPORT RESULTS SUMMARY"
 echo "=================================================="
 if [ -f "$SUMMARY_LOG" ]; then
     cat "$SUMMARY_LOG" | sort
     
-    success_count=$(grep -c "✅ BERHASIL" "$SUMMARY_LOG" 2>/dev/null || echo 0)
-    fail_count=$(grep -c "❌ GAGAL" "$SUMMARY_LOG" 2>/dev/null || echo 0)
+    success_count=$(grep -c "✅ SUCCESS" "$SUMMARY_LOG" 2>/dev/null || echo 0)
+    fail_count=$(grep -c "❌ FAILED" "$SUMMARY_LOG" 2>/dev/null || echo 0)
     total_accounts=$((success_count + fail_count))
 
     tot_msgs=$(awk -F'Total: ' '{print $2}' "$SUMMARY_LOG" | awk -F',' '{sum += $1} END {print sum+0}')
-    tot_imported=$(awk -F'Terimport: ' '{print $2}' "$SUMMARY_LOG" | awk -F',' '{sum += $1} END {print sum+0}')
-    tot_duplicate=$(awk -F'Duplikat: ' '{print $2}' "$SUMMARY_LOG" | awk -F')' '{sum += $1} END {print sum+0}')
+    tot_imported=$(awk -F'Imported: ' '{print $2}' "$SUMMARY_LOG" | awk -F',' '{sum += $1} END {print sum+0}')
+    tot_duplicate=$(awk -F'Duplicate: ' '{print $2}' "$SUMMARY_LOG" | awk -F')' '{sum += $1} END {print sum+0}')
 
     echo "--------------------------------------------------"
-    echo "Platform Mail Server: $MAIL_PLATFORM (User: $MAIL_USER)"
-    echo "Total Akun Diproses : $total_accounts (Berhasil: $success_count, Gagal: $fail_count)"
-    echo "Total Pesan         : $tot_msgs"
-    echo "Total Terimport     : $tot_imported"
-    echo "Total Duplikat      : $tot_duplicate"
+    echo "Mail Server Platform : $MAIL_PLATFORM (User: $MAIL_USER)"
+    echo "Total Accounts       : $total_accounts (Success: $success_count, Failed: $fail_count)"
+    echo "Total Messages       : $tot_msgs"
+    echo "Total Imported       : $tot_imported"
+    echo "Total Duplicates     : $tot_duplicate"
 else
-    echo "Tidak ada data ringkasan."
+    echo "No summary data available."
 fi
 echo "=================================================="
 rmdir "$RESTORE_TEMP_BASE" 2>/dev/null
-echo "Semua proses restore massal selesai! Silakan cek log detail di $LOG_DIR/"
+echo "All bulk restore processes completed! Check detailed logs in $LOG_DIR/"
