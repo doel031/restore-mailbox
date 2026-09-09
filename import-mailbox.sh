@@ -254,6 +254,29 @@ process_account() {
             esac
         done
 
+        # Pre-scan and merge any existing sharded folders (e.g. "Notifikasi BCA!2" -> "Notifikasi BCA")
+        echo "\$gaf_out" | awk '\$1 ~ /^[0-9]+\$/ {
+            id = \$1;
+            path = \$5;
+            for (i = 6; i <= NF; i++) path = path " " \$i;
+            if (path ~ /![0-9]+/) print id "\t" path;
+        }' | while IFS=$'\t' read -r fid fpath; do
+            clean_dest=\$(echo "\$fpath" | sed -E 's/![0-9]+(\/|$)/\1/g')
+            ensure_folder "\$clean_dest"
+            
+            # Move all messages from sharded folder to clean folder
+            s_res=\$(zmmailbox -z -m "$TARGET_ACCOUNT" search -l 1000 -t message "in:\"\$fpath\"" 2>/dev/null)
+            echo "\$s_res" | awk '\$1 ~ /^[0-9]+\$/ && \$2 == "mess" {print \$1}' | while read -r mid; do
+                if [ -n "\$mid" ]; then
+                    zmmailbox -z -m "$TARGET_ACCOUNT" moveMessage "\$mid" "\$clean_dest" >/dev/null 2>&1
+                fi
+            done
+            
+            # Delete the empty sharded folder
+            zmmailbox -z -m "$TARGET_ACCOUNT" deleteFolder "\$fpath" >/dev/null 2>&1
+            printf "[%s] [FOLDER] Merged sharded folder: %s -> %s\n" "\$(date '+%H:%M:%S')" "\$fpath" "\$clean_dest"
+        done
+
         # Pre-scan and repair any existing custom folders with 'unkn' view so they are visible in Webmail
         echo "\$gaf_out" | awk '\$2 == "unkn" && \$5 != "/" && \$5 != "/Trash" && \$1 ~ /^[0-9]+\$/ {
             id = \$1;
@@ -271,22 +294,25 @@ process_account() {
             # Get relative path to extraction folder
             rel_path=\${dir#\$TEMP_ROOT/}
             
+            # Clean Zimbra shard suffixes (!1, !2, !4, etc.) from all path segments
+            clean_path=\$(echo "\$rel_path" | sed -E 's/![0-9]+(\/|$)/\1/g')
+
             # Separate top-level folder name and subpath
-            top_level=\$(echo "\$rel_path" | cut -d/ -f1)
-            sub_path=\$(echo "\$rel_path" | cut -s -d/ -f2-)
+            top_level=\$(echo "\$clean_path" | cut -d/ -f1)
+            sub_path=\$(echo "\$clean_path" | cut -s -d/ -f2-)
             
             # Normalize top-level folder: map standard folders, place all other custom folders under Archive
             case "\$top_level" in
-                Inbox|Inbox!*|[iI]nbox|[iI]nbox!*) target_base="Inbox" ;;
-                Sent|Sent!*|[sS]ent|[sS]ent!*|[sS]end|[sS]end!*) target_base="Sent" ;;
-                Drafts|Drafts!*|[dD]rafts|[dD]rafts!*) target_base="Drafts" ;;
-                Trash|Trash!*|[tT]rash|[tT]rash!*) target_base="Trash" ;;
-                Junk|Junk!*|[jJ]unk|[jJ]unk!*|[sS]pam|[sS]pam!*) target_base="Junk" ;;
-                Archive|Archive!*|[aA]rchive|[aA]rchive!*|[aA]rchieve|[aA]rchieve!*) target_base="Archive" ;;
-                Contacts|Contacts!*|[cC]ontacts|[cC]ontacts!*) target_base="Contacts" ;;
-                Calendar|Calendar!*|[cC]alendar|[cC]alendar!*) target_base="Calendar" ;;
-                Tasks|Tasks!*|[tT]asks|[tT]asks!*) target_base="Tasks" ;;
-                Briefcase|Briefcase!*|[bB]riefcase|[bB]riefcase!*) target_base="Briefcase" ;;
+                Inbox|[iI]nbox) target_base="Inbox" ;;
+                Sent|[sS]ent|[sS]end) target_base="Sent" ;;
+                Drafts|[dD]rafts) target_base="Drafts" ;;
+                Trash|[tT]rash) target_base="Trash" ;;
+                Junk|[jJ]unk|[sS]pam) target_base="Junk" ;;
+                Archive|[aA]rchive|[aA]rchieve) target_base="Archive" ;;
+                Contacts|[cC]ontacts) target_base="Contacts" ;;
+                Calendar|[cC]alendar) target_base="Calendar" ;;
+                Tasks|[tT]asks) target_base="Tasks" ;;
+                Briefcase|[bB]riefcase) target_base="Briefcase" ;;
                 *) target_base="Archive/\$top_level" ;; # Put all other custom folders inside Archive
             esac
             
