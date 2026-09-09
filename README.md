@@ -6,6 +6,7 @@ Skrip bash otomatis untuk melakukan restore mailbox massal (bulk import) dari fi
 
 ## 🚀 Fitur Utama
 
+- **Deteksi Otomatis Platform (Zimbra / Carbonio)**: Otomatis mendeteksi sistem mail server yang berjalan (`zimbra` di `/opt/zimbra` atau `zextras` di `/opt/zextras`), mengeksekusi perintah dengan user yang sesuai, dan menyertakan bin path yang tepat.
 - **Pemrosesan Paralel (Multi-Jobs)**: Mendukung eksekusi beberapa akun secara bersamaan (default: 10 paralel) untuk mempercepat proses restore massal.
 - **Tampilan Status Real-time**: Menampilkan progres berjalan di terminal secara live (folder yang sedang diproses dan counter pesan per akun).
 - **Pencegahan Pesan Duplikat**: Mengecek `Message-ID` pesan sebelum diimpor ke Zimbra untuk mencegah duplikasi email.
@@ -18,8 +19,8 @@ Skrip bash otomatis untuk melakukan restore mailbox massal (bulk import) dari fi
 
 ## 📋 Persyaratan
 
-1. Server Linux dengan Zimbra Collaboration Suite (ZCS) atau Carbonio / Zextras.
-2. Hak akses **root** (karena skrip menjalankan `su - zextras`).
+1. Server Linux dengan **Zimbra Collaboration Suite (ZCS)** (user `zimbra`) atau **Carbonio / Zextras** (user `zextras`).
+2. Hak akses **root** (untuk menjalankan `su - zimbra` atau `su - zextras`).
 3. Utilitas dasar: `tar`, `grep`, `awk`, `find`, `sed`.
 
 ---

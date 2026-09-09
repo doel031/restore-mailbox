@@ -13,6 +13,37 @@ if [ -z "$INPUT_FILE" ] || [ ! -f "$INPUT_FILE" ]; then
     exit 1
 fi
 
+# Deteksi platform mail server: Carbonio (user: zextras) atau Zimbra (user: zimbra)
+if [ -n "$MAIL_USER" ]; then
+    if [ "$MAIL_USER" = "zextras" ]; then
+        MAIL_PLATFORM="Carbonio"
+    else
+        MAIL_PLATFORM="Zimbra"
+    fi
+elif id "zextras" &>/dev/null && [ -d "/opt/zextras" ]; then
+    MAIL_PLATFORM="Carbonio"
+    MAIL_USER="zextras"
+elif id "zimbra" &>/dev/null && [ -d "/opt/zimbra" ]; then
+    MAIL_PLATFORM="Zimbra"
+    MAIL_USER="zimbra"
+elif id "zextras" &>/dev/null; then
+    MAIL_PLATFORM="Carbonio"
+    MAIL_USER="zextras"
+elif id "zimbra" &>/dev/null; then
+    MAIL_PLATFORM="Zimbra"
+    MAIL_USER="zimbra"
+elif [ -d "/opt/zextras" ]; then
+    MAIL_PLATFORM="Carbonio"
+    MAIL_USER="zextras"
+elif [ -d "/opt/zimbra" ]; then
+    MAIL_PLATFORM="Zimbra"
+    MAIL_USER="zimbra"
+else
+    echo "Gagal: Tidak dapat mendeteksi mail server (Zimbra atau Carbonio tidak ditemukan)!"
+    echo "Pastikan sistem memiliki user 'zimbra' atau 'zextras'."
+    exit 1
+fi
+
 BASE_LOG_DIR="/var/log/restore-mailbox"
 mkdir -p "$BASE_LOG_DIR"
 
@@ -39,7 +70,7 @@ SUMMARY_LOG="$LOG_DIR/summary_report.txt"
 
 PROGRESS_DIR="$LOG_DIR/progress"
 mkdir -p "$PROGRESS_DIR"
-chmod 777 "$PROGRESS_DIR" # Agar bisa ditulis oleh zextras
+chmod 777 "$PROGRESS_DIR" # Agar bisa ditulis oleh user mail (zimbra/zextras)
 rm -f "$PROGRESS_DIR"/* 2>/dev/null
 
 RESTORE_TEMP_BASE="/tmp/restore"
@@ -52,6 +83,7 @@ print_status() {
     clear
     echo "=================================================="
     echo "      STATUS RESTORE BERJALAN [$(basename "$LOG_DIR")]"
+    echo "      Platform: $MAIL_PLATFORM (User: $MAIL_USER)"
     echo "=================================================="
     local active_jobs=0
     for pfile in "$PROGRESS_DIR"/*; do
@@ -124,8 +156,13 @@ process_account() {
         chmod 666 "$TEMP_EXTRACT_DIR/.dirlist"
         echo "0/$total_msgs Mulai..." > "$PROGRESS_DIR/$TARGET_ACCOUNT"
 
-        echo "Memulai import pesan ke mailbox..."
-        su - zextras <<EOF
+        echo "Memulai import pesan ke mailbox ($MAIL_PLATFORM via user $MAIL_USER)..."
+        su - "$MAIL_USER" <<EOF
+        if [ "$MAIL_USER" = "zextras" ]; then
+            export PATH="/opt/zextras/bin:\$PATH"
+        else
+            export PATH="/opt/zimbra/bin:\$PATH"
+        fi
         TEMP_ROOT="$TEMP_EXTRACT_DIR"
         total_msgs="$total_msgs"
         count=0
@@ -387,6 +424,7 @@ if [ -f "$SUMMARY_LOG" ]; then
     tot_duplicate=$(awk -F'Duplikat: ' '{print $2}' "$SUMMARY_LOG" | awk -F')' '{sum += $1} END {print sum+0}')
 
     echo "--------------------------------------------------"
+    echo "Platform Mail Server: $MAIL_PLATFORM (User: $MAIL_USER)"
     echo "Total Akun Diproses : $total_accounts (Berhasil: $success_count, Gagal: $fail_count)"
     echo "Total Pesan         : $tot_msgs"
     echo "Total Terimport     : $tot_imported"
