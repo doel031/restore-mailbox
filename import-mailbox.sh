@@ -195,21 +195,27 @@ process_account() {
             for part in "\${parts[@]}"; do
                 current="\$current/\$part"
                 if ! echo "\$created_folders" | grep -qx "\$current"; then
-                    cf_out=\$(zmmailbox -z -m "$TARGET_ACCOUNT" cf -V message "\$current" 2>&1)
+                    if [ "$MAIL_PLATFORM" = "Carbonio" ]; then
+                        cf_out=\$(zmmailbox -z -m "$TARGET_ACCOUNT" cf -V message "\$current" 2>&1)
+                    else
+                        cf_out=\$(zmmailbox -z -m "$TARGET_ACCOUNT" createFolder "\$current" 2>&1)
+                    fi
                     cf_status=\$?
                     ts_f=\$(date '+%H:%M:%S')
 
                     if [ \$cf_status -eq 0 ]; then
                         printf "[%s] [FOLDER] Created: %s\n" "\$ts_f" "\$current"
                     elif echo "\$cf_out" | grep -qi "already_exists"; then
-                        # If folder already exists, ensure its view is set to message (in case it was created as unknown)
-                        gf_res=\$(zmmailbox -z -m "$TARGET_ACCOUNT" getFolder "\$current" 2>/dev/null)
-                        gf_view=\$(echo "\$gf_res" | grep -m 1 '"view"' | sed -E 's/.*"view":[[:space:]]*"([^"]+)".*/\1/')
-                        if [ -n "\$gf_view" ] && [ "\$gf_view" != "message" ]; then
-                            gf_id=\$(echo "\$gf_res" | grep -m 1 '"id"' | sed -E 's/.*"id":[[:space:]]*"([^"]+)".*/\1/')
-                            if [ -n "\$gf_id" ]; then
-                                zmsoap -z -m "$TARGET_ACCOUNT" FolderActionRequest/action @id="\$gf_id" @op="update" @view="message" >/dev/null 2>&1
-                                printf "[%s] [FOLDER] Repaired view: %s\n" "\$ts_f" "\$current"
+                        if [ "$MAIL_PLATFORM" = "Carbonio" ]; then
+                            # If folder already exists in Carbonio, ensure its view is set to message (in case it was created as unknown)
+                            gf_res=\$(zmmailbox -z -m "$TARGET_ACCOUNT" getFolder "\$current" 2>/dev/null)
+                            gf_view=\$(echo "\$gf_res" | grep -m 1 '"view"' | sed -E 's/.*"view":[[:space:]]*"([^"]+)".*/\1/')
+                            if [ -n "\$gf_view" ] && [ "\$gf_view" != "message" ]; then
+                                gf_id=\$(echo "\$gf_res" | grep -m 1 '"id"' | sed -E 's/.*"id":[[:space:]]*"([^"]+)".*/\1/')
+                                if [ -n "\$gf_id" ]; then
+                                    zmsoap -z -m "$TARGET_ACCOUNT" FolderActionRequest/action @id="\$gf_id" @op="update" @view="message" >/dev/null 2>&1
+                                    printf "[%s] [FOLDER] Repaired view: %s\n" "\$ts_f" "\$current"
+                                fi
                             fi
                         fi
                     else
@@ -277,18 +283,20 @@ process_account() {
             printf "[%s] [FOLDER] Merged sharded folder: %s -> %s\n" "\$(date '+%H:%M:%S')" "\$fpath" "\$clean_dest"
         done
 
-        # Pre-scan and repair any existing custom folders with 'unkn' view so they are visible in Webmail
-        echo "\$gaf_out" | awk '\$2 == "unkn" && \$5 != "/" && \$5 != "/Trash" && \$1 ~ /^[0-9]+\$/ {
-            id = \$1;
-            path = \$5;
-            for (i = 6; i <= NF; i++) path = path " " \$i;
-            print id "\t" path;
-        }' | while IFS=$'\t' read -r fid fpath; do
-            if [ -n "\$fid" ] && [ -n "\$fpath" ]; then
-                zmsoap -z -m "$TARGET_ACCOUNT" FolderActionRequest/action @id="\$fid" @op="update" @view="message" >/dev/null 2>&1
-                printf "[%s] [FOLDER] Repaired view: %s\n" "\$(date '+%H:%M:%S')" "\$fpath"
-            fi
-        done
+        # Pre-scan and repair any existing custom folders with 'unkn' view (Carbonio specific)
+        if [ "$MAIL_PLATFORM" = "Carbonio" ]; then
+            echo "\$gaf_out" | awk '\$2 == "unkn" && \$5 != "/" && \$5 != "/Trash" && \$1 ~ /^[0-9]+\$/ {
+                id = \$1;
+                path = \$5;
+                for (i = 6; i <= NF; i++) path = path " " \$i;
+                print id "\t" path;
+            }' | while IFS=$'\t' read -r fid fpath; do
+                if [ -n "\$fid" ] && [ -n "\$fpath" ]; then
+                    zmsoap -z -m "$TARGET_ACCOUNT" FolderActionRequest/action @id="\$fid" @op="update" @view="message" >/dev/null 2>&1
+                    printf "[%s] [FOLDER] Repaired view: %s\n" "\$(date '+%H:%M:%S')" "\$fpath"
+                fi
+            done
+        fi
 
         while read -r dir; do
             # Get relative path to extraction folder
