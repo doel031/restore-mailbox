@@ -224,8 +224,37 @@ process_account() {
             done
         }
 
-        # Pre-scan and repair any existing custom folders with 'unkn' view so they are visible in Webmail
+        # Ensure /Archive exists
+        ensure_folder "/Archive"
+
+        # Pre-scan and move any existing custom root-level folders to /Archive so they are visible in Webmail
         gaf_out=\$(zmmailbox -z -m "$TARGET_ACCOUNT" gaf 2>/dev/null)
+        echo "\$gaf_out" | awk '\$1 ~ /^[0-9]+\$/ {
+            id = \$1;
+            path = \$5;
+            for (i = 6; i <= NF; i++) path = path " " \$i;
+            print id "\t" path;
+        }' | while IFS=$'\t' read -r fid fpath; do
+            case "\$fpath" in
+                /|/Inbox|/Inbox/*|/Sent|/Sent/*|/Drafts|/Drafts/*|/Trash|/Trash/*|/Junk|/Junk/*|/Archive|/Archive/*|/Contacts|/Contacts/*|/Calendar|/Calendar/*|/Tasks|/Tasks/*|/Briefcase|/Briefcase/*|/Chats*|/Emailed\ Contacts*)
+                    # Standard system / default folders, keep as is
+                    ;;
+                /*)
+                    # Non-standard custom folder at root level (e.g. /Cosco)
+                    top_f=\$(echo "\${fpath#/}" | cut -d/ -f1)
+                    sub_f=\$(echo "\${fpath#/}" | cut -s -d/ -f2-)
+                    if [ -z "\$sub_f" ]; then
+                        # Move /Cosco to /Archive/Cosco
+                        zmmailbox -z -m "$TARGET_ACCOUNT" renameFolder "\$fpath" "/Archive/\$top_f" >/dev/null 2>&1
+                        if [ \$? -eq 0 ]; then
+                            printf "[%s] [FOLDER] Moved custom folder: %s -> /Archive/%s\n" "\$(date '+%H:%M:%S')" "\$fpath" "\$top_f"
+                        fi
+                    fi
+                    ;;
+            esac
+        done
+
+        # Pre-scan and repair any existing custom folders with 'unkn' view so they are visible in Webmail
         echo "\$gaf_out" | awk '\$2 == "unkn" && \$5 != "/" && \$5 != "/Trash" && \$1 ~ /^[0-9]+\$/ {
             id = \$1;
             path = \$5;
@@ -246,18 +275,19 @@ process_account() {
             top_level=\$(echo "\$rel_path" | cut -d/ -f1)
             sub_path=\$(echo "\$rel_path" | cut -s -d/ -f2-)
             
-            # Normalize top-level folder from sharding (e.g. Inbox!123 to Inbox)
+            # Normalize top-level folder: map standard folders, place all other custom folders under Archive
             case "\$top_level" in
-                Inbox|Inbox!*) target_base="Inbox" ;;
-                Sent|Sent!*) target_base="Sent" ;;
-                Drafts|Drafts!*) target_base="Drafts" ;;
-                Trash|Trash!*) target_base="Trash" ;;
-                Junk|Junk!*) target_base="Junk" ;;
-                Contacts|Contacts!*) target_base="Contacts" ;;
-                Calendar|Calendar!*) target_base="Calendar" ;;
-                Tasks|Tasks!*) target_base="Tasks" ;;
-                Briefcase|Briefcase!*) target_base="Briefcase" ;;
-                *) target_base="\$top_level" ;; # Keep custom folder as is
+                Inbox|Inbox!*|[iI]nbox|[iI]nbox!*) target_base="Inbox" ;;
+                Sent|Sent!*|[sS]ent|[sS]ent!*|[sS]end|[sS]end!*) target_base="Sent" ;;
+                Drafts|Drafts!*|[dD]rafts|[dD]rafts!*) target_base="Drafts" ;;
+                Trash|Trash!*|[tT]rash|[tT]rash!*) target_base="Trash" ;;
+                Junk|Junk!*|[jJ]unk|[jJ]unk!*|[sS]pam|[sS]pam!*) target_base="Junk" ;;
+                Archive|Archive!*|[aA]rchive|[aA]rchive!*|[aA]rchieve|[aA]rchieve!*) target_base="Archive" ;;
+                Contacts|Contacts!*|[cC]ontacts|[cC]ontacts!*) target_base="Contacts" ;;
+                Calendar|Calendar!*|[cC]alendar|[cC]alendar!*) target_base="Calendar" ;;
+                Tasks|Tasks!*|[tT]asks|[tT]asks!*) target_base="Tasks" ;;
+                Briefcase|Briefcase!*|[bB]riefcase|[bB]riefcase!*) target_base="Briefcase" ;;
+                *) target_base="Archive/\$top_level" ;; # Put all other custom folders inside Archive
             esac
             
             # Recombine with subpath if present
@@ -294,8 +324,8 @@ process_account() {
                 msg_id=\$(grep -i -m 1 "^Message-ID:" "\$f" | sed -E 's/^Message-ID:[[:space:]]*//I' | tr -d '<>\r')
                 
                 if [ -n "\$msg_id" ]; then
-                    # Check if message with same Message-ID already exists in mailbox
-                    search_res=\$(zmmailbox -z -m "$TARGET_ACCOUNT" search -l 1 "msgid:\$msg_id" 2>/dev/null)
+                    # Check if message with same Message-ID already exists in target folder
+                    search_res=\$(zmmailbox -z -m "$TARGET_ACCOUNT" search -l 1 "in:\"\$target_folder\" msgid:\$msg_id" 2>/dev/null)
                     found_count=\$(echo "\$search_res" | grep -i "^num:" | awk '{print \$2}' | tr -d ',')
                     
                     if [ -n "\$found_count" ] && [ "\$found_count" -gt 0 ]; then
