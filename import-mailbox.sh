@@ -195,7 +195,7 @@ process_account() {
             for part in "\${parts[@]}"; do
                 current="\$current/\$part"
                 if ! echo "\$created_folders" | grep -qx "\$current"; then
-                    cf_out=\$(zmmailbox -z -m "$TARGET_ACCOUNT" createFolder --view message "\$current" 2>&1)
+                    cf_out=\$(zmmailbox -z -m "$TARGET_ACCOUNT" cf -V message "\$current" 2>&1)
                     cf_status=\$?
                     ts_f=\$(date '+%H:%M:%S')
 
