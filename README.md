@@ -7,7 +7,7 @@ An automated bash script for bulk restoring (importing) mailboxes from `.tgz` ba
 ## 🚀 Key Features
 
 - **Automatic Platform Detection (Zimbra / Carbonio)**: Automatically detects the running mail server platform (`zimbra` in `/opt/zimbra` or `zextras` in `/opt/zextras`), executes commands under the appropriate user (`zimbra` or `zextras`), and configures the correct binary path.
-- **Parallel Processing (Multi-Jobs)**: Supports concurrent execution of multiple accounts (default: 10 parallel jobs) to significantly speed up bulk restorations.
+- **Parallel Processing (Multi-Jobs)**: Supports concurrent execution of multiple accounts (default: 5 parallel jobs) to significantly speed up bulk restorations. Customizable via the `-p` or `--parallel` flag.
 - **Real-time Status Monitoring**: Live terminal progress display showing current active folder and processed message counter for each account.
 - **Duplicate Prevention**: Checks email `Message-ID` headers prior to importing to prevent duplicate messages in the mailbox.
 - **Hierarchical Folder Creation (`mkdir -p`)**: Automatically creates all ancestor/parent directories down to the deepest nested subfolders before importing messages.
@@ -47,6 +47,11 @@ user3@domain.com, /backup/user3@domain.com.tgz
 2. Run the script as root with the path to your CSV input file:
    ```bash
    sudo ./import-mailbox.sh /path/to/input_file.csv
+   ```
+
+   *(Optional)* Run with a specific number of parallel jobs (e.g., 10):
+   ```bash
+   sudo ./import-mailbox.sh -p 10 /path/to/input_file.csv
    ```
 
 3. *(Optional)* Override mail user manually if needed:
