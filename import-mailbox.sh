@@ -561,7 +561,7 @@ process_account() {
                 fi
 
                 # Extract Message-ID to prevent duplicates
-                msg_id=\$(grep -i -m 1 "^Message-ID:" "\$f" | sed -E 's/^Message-ID:[[:space:]]*//I' | tr -d '<>\r"\ '\''\\')
+                msg_id=\$(grep -i -m 1 "^Message-ID:" "\$f" | sed -E -e 's/^Message-ID:[[:space:]]*//I' -e 's/[<>"[:space:]\\\\]//g' -e "s/'//g")
                 
                 if [ -n "\$msg_id" ]; then
                     # Check if message with same Message-ID already exists in target folder
