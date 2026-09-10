@@ -6,10 +6,35 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-INPUT_FILE="$1"
+MAX_PARALLEL=5
+INPUT_FILE=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -p|--parallel)
+            MAX_PARALLEL="$2"
+            shift 2
+            ;;
+        *)
+            if [ -z "$INPUT_FILE" ]; then
+                INPUT_FILE="$1"
+                shift
+            else
+                echo "Unknown argument: $1"
+                exit 1
+            fi
+            ;;
+    esac
+done
+
 if [ -z "$INPUT_FILE" ] || [ ! -f "$INPUT_FILE" ]; then
     echo "Error: Input file not found or not specified!"
-    echo "Usage: $0 /path/to/input_file.csv"
+    echo "Usage: $0 [-p <parallel_jobs>] /path/to/input_file.csv"
+    exit 1
+fi
+
+if ! [[ "$MAX_PARALLEL" =~ ^[0-9]+$ ]] || [ "$MAX_PARALLEL" -le 0 ]; then
+    echo "Error: Parallel jobs (-p) must be a positive integer."
     exit 1
 fi
 
@@ -81,8 +106,7 @@ mkdir -p "$RESTORE_TEMP_BASE"
 chown "$MAIL_USER":"$MAIL_USER" "$RESTORE_TEMP_BASE" 2>/dev/null
 chmod 770 "$RESTORE_TEMP_BASE"
 
-# Concurrency limit (can be overridden via environment variable)
-MAX_PARALLEL="${MAX_PARALLEL:-10}"
+
 
 declare -a CHILD_PIDS=()
 
