@@ -70,14 +70,21 @@ SUMMARY_LOG="$LOG_DIR/summary_report.txt"
 
 PROGRESS_DIR="$LOG_DIR/progress"
 mkdir -p "$PROGRESS_DIR"
-chmod 777 "$PROGRESS_DIR" # Allow write access for mail user (zimbra/zextras)
+# Restrict permissions: mail user and root only (replaces world-writable 777)
+chown "$MAIL_USER":"$MAIL_USER" "$PROGRESS_DIR" 2>/dev/null
+chmod 770 "$PROGRESS_DIR"
 rm -f "$PROGRESS_DIR"/* 2>/dev/null
 
-RESTORE_TEMP_BASE="/tmp/restore"
+# Base temporary restore directory (can be overridden via environment variable, e.g. for 100GB+ restores)
+RESTORE_TEMP_BASE="${RESTORE_TEMP_BASE:-/tmp/restore}"
 mkdir -p "$RESTORE_TEMP_BASE"
-chmod 777 "$RESTORE_TEMP_BASE"
+chown "$MAIL_USER":"$MAIL_USER" "$RESTORE_TEMP_BASE" 2>/dev/null
+chmod 770 "$RESTORE_TEMP_BASE"
 
-MAX_PARALLEL=10
+# Concurrency limit (can be overridden via environment variable)
+MAX_PARALLEL="${MAX_PARALLEL:-10}"
+
+declare -a CHILD_PIDS=()
 
 print_status() {
     clear
@@ -108,7 +115,11 @@ print_status() {
 cleanup() {
     echo ""
     echo "[!] Process interrupted by user (Ctrl+C). Terminating background jobs..."
-    # Kill all child/background processes spawned by this script
+    # Terminate all tracked child processes and their process trees
+    for pid in "${CHILD_PIDS[@]}"; do
+        pkill -TERM -P "$pid" 2>/dev/null
+        kill -TERM "$pid" 2>/dev/null
+    done
     pkill -P $$ 2>/dev/null
     wait 2>/dev/null
 
@@ -144,7 +155,8 @@ process_account() {
 
         # Pre-check: Verify target account existence on mail server before extracting archive
         echo "Checking account on $MAIL_PLATFORM..." > "$PROGRESS_DIR/$TARGET_ACCOUNT"
-        chmod 666 "$PROGRESS_DIR/$TARGET_ACCOUNT" 2>/dev/null
+        chown "$MAIL_USER":"$MAIL_USER" "$PROGRESS_DIR/$TARGET_ACCOUNT" 2>/dev/null
+        chmod 660 "$PROGRESS_DIR/$TARGET_ACCOUNT" 2>/dev/null
 
         local acc_check
         if [ "$MAIL_USER" = "zextras" ]; then
@@ -170,19 +182,54 @@ process_account() {
         fi
 
         echo "Extracting backup archive..." > "$PROGRESS_DIR/$TARGET_ACCOUNT"
-        chmod 666 "$PROGRESS_DIR/$TARGET_ACCOUNT"
+        chown "$MAIL_USER":"$MAIL_USER" "$PROGRESS_DIR/$TARGET_ACCOUNT" 2>/dev/null
+        chmod 660 "$PROGRESS_DIR/$TARGET_ACCOUNT" 2>/dev/null
 
         echo "Extracting backup archive to $TEMP_EXTRACT_DIR ..."
         mkdir -p "$TEMP_EXTRACT_DIR"
-        chmod 777 "$TEMP_EXTRACT_DIR"
+        chown "$MAIL_USER":"$MAIL_USER" "$TEMP_EXTRACT_DIR" 2>/dev/null
+        chmod 770 "$TEMP_EXTRACT_DIR"
+
+        # Disk-space guard: Calculate required space proportionally.
+        # Estimated extraction size = 3x compressed archive size + 256 MB safety buffer.
+        # Accommodates small backups (e.g. 5 MB) while preventing disk-full crashes on large backups (e.g. 100 GB).
+        tgz_kb=$(du -k "$TGZ_FILE" 2>/dev/null | awk '{print $1}')
+        [ -z "$tgz_kb" ] && tgz_kb=0
+        need_kb=$(( (tgz_kb * 3) + 262144 ))
+        avail_kb=$(df -Pk "$RESTORE_TEMP_BASE" 2>/dev/null | awk 'NR==2 {print $4}')
+        [ -z "$avail_kb" ] && avail_kb=0
+
+        if [ "$avail_kb" -lt "$need_kb" ]; then
+            need_mb=$((need_kb / 1024))
+            avail_mb=$((avail_kb / 1024))
+            echo "[ERROR] Not enough local disk space in $RESTORE_TEMP_BASE to extract $TGZ_FILE (need ~${need_mb}MB, have ${avail_mb}MB free)"
+            echo "❌ FAILED: $TARGET_ACCOUNT (insufficient local disk space for extraction: need ~${need_mb}MB, free ${avail_mb}MB)" >> "$SUMMARY_LOG"
+            rm -f "$PROGRESS_DIR/$TARGET_ACCOUNT"
+            rm -rf "$TEMP_EXTRACT_DIR"
+            return
+        fi
+
         tar -xzf "$TGZ_FILE" -C "$TEMP_EXTRACT_DIR"
+        local tar_status=$?
+        if [ $tar_status -ne 0 ]; then
+            echo "[ERROR] Failed to extract archive: $TGZ_FILE (tar exit code: $tar_status)"
+            echo "❌ FAILED: $TARGET_ACCOUNT (corrupted or invalid .tgz archive)" >> "$SUMMARY_LOG"
+            rm -f "$PROGRESS_DIR/$TARGET_ACCOUNT"
+            rm -rf "$TEMP_EXTRACT_DIR"
+            return
+        fi
+
+        # Ensure extracted files and folders are readable and writable by $MAIL_USER
+        chown -R "$MAIL_USER":"$MAIL_USER" "$TEMP_EXTRACT_DIR" 2>/dev/null
+        chmod -R u+rwX,g+rwX "$TEMP_EXTRACT_DIR" 2>/dev/null
 
         # Count total files (messages) and calculate extracted backup size
         local total_msgs=$(find "$TEMP_EXTRACT_DIR" -type f -not -name "*.meta" 2>/dev/null | wc -l | tr -d ' ')
         local backup_kb=$(du -sk "$TEMP_EXTRACT_DIR" 2>/dev/null | awk '{print $1}')
         local backup_bytes=$((backup_kb * 1024))
         find "$TEMP_EXTRACT_DIR" -type d | sort > "$TEMP_EXTRACT_DIR/.dirlist"
-        chmod 666 "$TEMP_EXTRACT_DIR/.dirlist"
+        chown "$MAIL_USER":"$MAIL_USER" "$TEMP_EXTRACT_DIR/.dirlist" 2>/dev/null
+        chmod 660 "$TEMP_EXTRACT_DIR/.dirlist" 2>/dev/null
         echo "0/$total_msgs Starting..." > "$PROGRESS_DIR/$TARGET_ACCOUNT"
 
         echo "Starting message import to mailbox ($MAIL_PLATFORM via user $MAIL_USER)..."
@@ -780,7 +827,20 @@ while IFS=',' read -r TARGET_ACCOUNT TGZ_FILE; do
         \#*|[aA]ccount|[eE]mail|TARGET_ACCOUNT) continue ;; # Skip comments and header rows
     esac
 
+    # SECURITY: Validate email address format to protect against shell metacharacter injection
+    if ! [[ "$TARGET_ACCOUNT" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+        echo "⚠️  Skipping invalid account entry: '$TARGET_ACCOUNT' (not a valid email address)" | tee -a "$SUMMARY_LOG"
+        continue
+    fi
+
+    # Verify backup file existence before spawning background job
+    if [ ! -f "$TGZ_FILE" ]; then
+        echo "❌ FAILED: $TARGET_ACCOUNT (backup file not found: $TGZ_FILE)" >> "$SUMMARY_LOG"
+        continue
+    fi
+
     process_account "$TARGET_ACCOUNT" "$TGZ_FILE" &
+    CHILD_PIDS+=("$!")
 
     while [ $(jobs -r | wc -l) -ge $MAX_PARALLEL ]; do
         print_status
