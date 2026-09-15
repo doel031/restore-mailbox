@@ -6,35 +6,22 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-MAX_PARALLEL=5
-INPUT_FILE=""
+TARGET_ACCOUNT="$1"
+TGZ_FILE="$2"
 
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        -p|--parallel)
-            MAX_PARALLEL="$2"
-            shift 2
-            ;;
-        *)
-            if [ -z "$INPUT_FILE" ]; then
-                INPUT_FILE="$1"
-                shift
-            else
-                echo "Unknown argument: $1"
-                exit 1
-            fi
-            ;;
-    esac
-done
-
-if [ -z "$INPUT_FILE" ] || [ ! -f "$INPUT_FILE" ]; then
-    echo "Error: Input file not found or not specified!"
-    echo "Usage: $0 [-p <parallel_jobs>] /path/to/input_file.csv"
+if [ -z "$TARGET_ACCOUNT" ] || [ -z "$TGZ_FILE" ]; then
+    echo "Error: Account or backup file not specified!"
+    echo "Usage: $0 <account_email> </path/to/backup.tgz>"
     exit 1
 fi
 
-if ! [[ "$MAX_PARALLEL" =~ ^[0-9]+$ ]] || [ "$MAX_PARALLEL" -le 0 ]; then
-    echo "Error: Parallel jobs (-p) must be a positive integer."
+if ! [[ "$TARGET_ACCOUNT" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+    echo "Error: Invalid account email: '$TARGET_ACCOUNT'"
+    exit 1
+fi
+
+if [ ! -f "$TGZ_FILE" ]; then
+    echo "Error: Backup file not found: $TGZ_FILE"
     exit 1
 fi
 
@@ -842,36 +829,8 @@ EOF
     } > "$ACCOUNT_LOG" 2>&1
 }
 
-while IFS=',' read -r TARGET_ACCOUNT TGZ_FILE; do
-    TARGET_ACCOUNT=$(echo "$TARGET_ACCOUNT" | xargs)
-    TGZ_FILE=$(echo "$TGZ_FILE" | xargs)
-    
-    [ -z "$TARGET_ACCOUNT" ] || [ -z "$TGZ_FILE" ] && continue
-    case "$TARGET_ACCOUNT" in
-        \#*|[aA]ccount|[eE]mail|TARGET_ACCOUNT) continue ;; # Skip comments and header rows
-    esac
-
-    # SECURITY: Validate email address format to protect against shell metacharacter injection
-    if ! [[ "$TARGET_ACCOUNT" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-        echo "⚠️  Skipping invalid account entry: '$TARGET_ACCOUNT' (not a valid email address)" | tee -a "$SUMMARY_LOG"
-        continue
-    fi
-
-    # Verify backup file existence before spawning background job
-    if [ ! -f "$TGZ_FILE" ]; then
-        echo "❌ FAILED: $TARGET_ACCOUNT (backup file not found: $TGZ_FILE)" >> "$SUMMARY_LOG"
-        continue
-    fi
-
-    process_account "$TARGET_ACCOUNT" "$TGZ_FILE" &
-    CHILD_PIDS+=("$!")
-
-    while [ $(jobs -r | wc -l) -ge $MAX_PARALLEL ]; do
-        print_status
-        sleep 2
-    done
-
-done < "$INPUT_FILE"
+process_account "$TARGET_ACCOUNT" "$TGZ_FILE" &
+CHILD_PIDS+=("$!")
 
 while [ $(jobs -r | wc -l) -gt 0 ]; do
     print_status
